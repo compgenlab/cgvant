@@ -206,6 +206,11 @@ func (m *editModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = nil
 		if m.isForm() {
+			// ctrl+g is a reliable cancel/back that doesn't depend on ESC (which tmux
+			// delays or swallows) and never collides with text input.
+			if msg.String() == "ctrl+g" {
+				return m, m.onFormAbort()
+			}
 			return m.updateForm(msg)
 		}
 		return m.updateList(msg)
@@ -260,10 +265,7 @@ func (m *editModel) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case scrSnapshots:
 		switch msg.String() {
-		case "q":
-			m.quitting = true
-			return m, tea.Quit
-		case "esc":
+		case "q", "esc":
 			return m, m.toHome()
 		case "n":
 			return m, m.toNewSnap()
@@ -276,28 +278,22 @@ func (m *editModel) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case scrFragments:
+		// A snapshot only *selects* from already-configured sources; new sources are
+		// created in the Sources library, not here.
 		switch msg.String() {
 		case "esc", "q":
 			return m, m.toSnapshots()
-		case "s":
-			m.startNewSource()
-			return m, m.toSourceForm()
-		case "b":
-			return m, m.toBuiltins(m.curSnap)
 		case "m":
 			return m, m.toSnapMembers()
 		case "d":
 			return m, m.toSnapDefaults()
 		case "enter":
 			switch sel.kind {
-			case "source":
+			case "source": // edit an already-included source in place
 				m.openSource(sel.payload)
 				return m, m.toSourceForm()
-			case "builtin", "addbuiltin":
+			case "builtin":
 				return m, m.toBuiltins(m.curSnap)
-			case "addsource":
-				m.startNewSource()
-				return m, m.toSourceForm()
 			}
 		}
 	case scrAnnotations:
@@ -659,8 +655,10 @@ func (m *editModel) toFragments(snap string) tea.Cmd {
 			}
 		}
 	}
-	items = append(items, item{title: "＋ Add source", kind: "addsource"})
-	items = append(items, item{title: "＋ Builtins", kind: "addbuiltin"})
+	if len(items) == 0 {
+		items = append(items, item{title: "(no sources in this snapshot yet)",
+			desc: "press m to select from the source library", kind: "empty"})
+	}
 	m.setList(items)
 	return nil
 }
@@ -1134,21 +1132,21 @@ func (m *editModel) renderFooter() string {
 func (m *editModel) hints() [][2]string {
 	switch m.screen {
 	case scrHome:
-		return [][2]string{{"enter", "open"}, {"↑↓", "move"}, {"q", "quit"}}
+		return [][2]string{{"enter", "open"}, {"q", "quit"}}
 	case scrSources:
-		return [][2]string{{"enter", "edit"}, {"s", "add source"}, {"b", "builtins"}, {"/", "filter"}, {"esc", "home"}}
+		return [][2]string{{"enter", "edit"}, {"s", "add source"}, {"b", "builtins"}, {"/", "filter"}, {"q", "home"}}
 	case scrSnapshots:
-		return [][2]string{{"enter", "open"}, {"n", "new"}, {"/", "filter"}, {"esc", "home"}, {"q", "quit"}}
+		return [][2]string{{"enter", "open"}, {"n", "new"}, {"/", "filter"}, {"q", "back"}}
 	case scrFragments:
-		return [][2]string{{"enter", "edit"}, {"s", "add source"}, {"b", "builtins"}, {"m", "members"}, {"d", "defaults"}, {"esc", "back"}}
+		return [][2]string{{"m", "select sources"}, {"d", "defaults"}, {"enter", "edit"}, {"q", "back"}}
 	case scrSnapMembers, scrSnapDefaults:
-		return [][2]string{{"space", "toggle"}, {"enter", "save"}, {"esc", "cancel"}}
+		return [][2]string{{"space", "toggle"}, {"enter", "save"}, {"^g", "cancel"}}
 	case scrAnnotations:
-		return [][2]string{{"enter", "edit"}, {"d", "delete"}, {"esc", "back"}}
+		return [][2]string{{"enter", "edit"}, {"d", "delete"}, {"q", "back"}}
 	case scrBuiltins:
-		return [][2]string{{"enter", "add"}, {"d", "remove"}, {"esc", "back"}}
-	default:
-		return [][2]string{{"tab", "next"}, {"enter", "confirm"}, {"esc", "cancel"}}
+		return [][2]string{{"enter", "add"}, {"d", "remove"}, {"q", "back"}}
+	default: // forms
+		return [][2]string{{"tab", "next"}, {"enter", "confirm"}, {"^g", "cancel"}}
 	}
 }
 

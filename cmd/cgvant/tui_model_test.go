@@ -182,9 +182,17 @@ func TestEditorViewRenders(t *testing.T) {
 	m.width, m.height = 90, 24
 	m.toSnapshots()
 	out := m.View()
-	for _, want := range []string{"cgvant", "snapshots", "quit"} {
+	for _, want := range []string{"cgvant", "snapshots", "back"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("snapshots view missing %q", want)
+		}
+	}
+	// The home menu renders with the three areas.
+	m.toHome()
+	home := m.View()
+	for _, want := range []string{"Config settings", "Sources", "Snapshots", "quit"} {
+		if !strings.Contains(home, want) {
+			t.Errorf("home view missing %q", want)
 		}
 	}
 	// A source form renders without panic, showing the breadcrumb + first field.
