@@ -1,0 +1,22 @@
+# local DB cache
+*.db
+*.db-shm
+*.db-wal
+
+# downloaded/indexed reference data
+/data/
+
+# local config (copy from config.example.toml)
+config.toml
+
+# build output
+/varserv
+/bin/
+/dist/
+
+# local scratch
+/tmp/
+
+# go workspace (machine-local)
+go.work
+go.work.sum

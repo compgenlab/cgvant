@@ -1,0 +1,12 @@
+##fileformat=VCFv4.2
+##INFO=<ID=AC,Number=A,Type=Integer,Description="Allele count">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SAMPLE1	SAMPLE2
+chr1	100	.	A	G	50	PASS	AC=3	GT	0/1	1/1
+chr1	250	.	C	T	60	PASS	AC=1	GT	0/0	0/1
+chr1	5000	.	G	A,C	40	PASS	AC=2	GT	1/2	0/1
+chr1	99000	.	T	C	55	PASS	AC=5	GT	0/1	0/0
+chr2	1500	.	GG	G	70	PASS	AC=1	GT	0/1	0/0
+chr2	8800	.	A	AT	45	PASS	AC=4	GT	1/1	0/1
+chr17	43044295	.	G	A	80	PASS	AC=2	GT	0/1	0/1
+chr17	43045000	.	C	G	65	PASS	AC=1	GT	0/0	0/1

@@ -1,0 +1,20 @@
+# A local source. `url`/`url_index` are the canonical reference (kept for
+# provenance and the registry); `localpath`/`localpath_index` are this machine's
+# actual files. When `localpath` is set the file is used exactly and never
+# downloaded. `localpath`/`localpath_index` are stripped by `registry submit`.
+# A relative localpath resolves under data_dir; absolute is used as-is. Environment
+# variables are expanded (${VAR} / $VAR, incl. $CGTAG_HOME). If localpath_index is
+# omitted, the index is expected alongside (<localpath>.tbi).
+[[sources]]
+name            = "dbsnp"
+version         = "b156"
+assembly        = "GRCh38"
+format          = "vcf"
+url             = "https://.../dbSNP.b156.hg38.vcf.gz"     # reference only
+localpath       = "${REFS}/dbsnp/dbSNP.b156.hg38.vcf.gz"   # $REFS from the environment
+localpath_index = "${REFS}/dbsnp/dbSNP.b156.hg38.vcf.gz.tbi"
+
+  [[sources.annotations]]
+  name   = "dbsnp_id"     # @ID copies the matched record's ID column
+  field  = "@ID"
+  unique = true

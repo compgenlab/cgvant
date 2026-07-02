@@ -1,0 +1,22 @@
+# Built-in annotators — cgtag's self-contained "built-in tool calls" (hts, no data
+# file). One source of `type = "builtin"` holds them; each annotation names its
+# builtin. Applied only in the `annotate -o` (VCF -> annotated VCF) path.
+#   variant-only   (from chrom/pos/ref/alt; work on any VCF):
+#                  auto_id, indel, tstv (CG_TSTV), vardist (CG_VARDIST), tags.
+#   sample-derived (read the input VCF's per-sample FORMAT, so they need samples):
+#                  dosage (CG_DS, GT), vaf (CG_VAF, SAC), minor_strand (CG_SBPCT),
+#                  fisher_sb (CG_FSB), copy_logratio (CG_CNLR, AD).
+# Parameterized builtins (tags, copy_logratio) carry their argument in `args`.
+[[sources]]
+name    = "builtins"
+version = "1"
+type    = "builtin"
+  [[sources.annotations]]
+  builtin = "auto_id"
+  [[sources.annotations]]
+  builtin = "indel"
+  [[sources.annotations]]
+  builtin = "tstv"
+  [[sources.annotations]]
+  builtin = "tags"
+  args = "PANEL:v1"

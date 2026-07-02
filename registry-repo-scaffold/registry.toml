@@ -1,0 +1,32 @@
+# cgtag public data registry — catalog of source/release configs (NOT the data).
+# Served as a static file; cgtag fetches it over HTTPS. Each entry's `file` is a
+# path (relative to this file's directory) to a config snippet. The on-disk name is
+# free (the client loads whatever `file` says); the convention is
+# sources/<name>/<version>/<name>-<version>.toml.
+#
+# Sources are added by the issue-to-pr workflow when a `source-submission` issue
+# is filed (e.g. via `cgtag registry submit`). Example shape:
+#
+# [[sources]]
+# name        = "clinvar"
+# version     = "2026-01"
+# assembly    = "GRCh38"
+# file        = "sources/clinvar/2026-01/clinvar-2026-01.toml"
+# latest      = true   # resolved for `clinvar` / `clinvar:latest` (versions aren't auto-sorted)
+# description = "ClinVar clinical significance"
+#
+# [[releases]]
+# name        = "2026-06"
+# file        = "releases/2026-06.toml"
+# description = "GRCh38 starter release"
+
+# A "build" source: its [[sources.build]] recipe + co-located helper script
+# (alongside the fragment) ship together, so `cgtag registry add-source` pulls both
+# and `cgtag download` reproduces the indexed file locally.
+[[sources]]
+name        = "revel"
+version     = "1.3"
+assembly    = "GRCh38"
+file        = "sources/revel/1.3/revel-1.3.toml"
+latest      = true
+description = "REVEL missense pathogenicity (built from CSV segments)"

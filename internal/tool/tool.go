@@ -1,0 +1,292 @@
+// Package tool runs external (often containerized) annotators such as VEP. A
+// tool is an ordered list of templated shell steps that transform an input VCF
+// into an annotated output file (tab/vcf); the output is then consumed as a
+// normal source. Steps run via a context-selected runner: "local" (subprocess)
+// or "batch" (a submit template, e.g. `sbatch --wait`). Container steps are
+// wrapped with the tool's container engine (apptainer/singularity).
+package tool
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/compgenlab/hts/htsio/tabix"
+
+	"github.com/compgenlab/cgtag/internal/config"
+)
+
+// Params carry the values substituted into step templates.
+type Params struct {
+	Input   string // input VCF
+	Output  string // final output file the last step writes
+	Workdir string // shared scratch dir between steps
+	Image   string // resolved (cached) container image path
+	Ref     string // reference FASTA
+	Datadir string // the tool's persistent data dir ({datadir}); bound into container steps
+	Chrom   string // optional chromosome filter
+	// AssetDir is the tool fragment's directory (the snapshot dir): declared
+	// tool.Assets are resolved relative to it and staged into Workdir before steps
+	// run (see stageAssets). Empty when the tool declares no relative assets.
+	AssetDir string
+}
+
+// Run executes a tool's steps in workdir, producing p.Output, and ensures the
+// output is tabix-indexed.
+func Run(ctx context.Context, t config.Tool, p Params) error {
+	if len(t.Steps) == 0 {
+		return fmt.Errorf("tool %s: no steps defined", t.ID())
+	}
+	if err := stageAssets(t, p); err != nil {
+		return fmt.Errorf("tool %s: %w", t.ID(), err)
+	}
+	for i, step := range t.Steps {
+		if err := runStep(ctx, t, step, i, p); err != nil {
+			return fmt.Errorf("tool %s: step %q: %w", t.ID(), stepLabel(step, i), err)
+		}
+	}
+	if err := ensureIndex(p.Output, t.Format); err != nil {
+		return fmt.Errorf("tool %s: index output: %w", t.ID(), err)
+	}
+	return nil
+}
+
+// PullImage pulls a registry-ref image (docker://, …) to dest via the tool's
+// container engine (e.g. `apptainer pull <dest> docker://…`).
+func PullImage(ctx context.Context, t config.Tool, dest string) error {
+	if err := exec1(ctx, filepath.Dir(dest), t.ContainerEngine(), "pull", dest, t.Image); err != nil {
+		return fmt.Errorf("tool %s: pull %s: %w", t.ID(), t.Image, err)
+	}
+	return nil
+}
+
+// Setup runs a tool's one-time setup steps (e.g. VEP's INSTALL.pl), installing the
+// tool's data into p.Datadir. Container setup steps run inside the image with the
+// data dir bound. No-op when the tool has no setup.
+func Setup(ctx context.Context, t config.Tool, p Params) error {
+	if err := stageAssets(t, p); err != nil {
+		return fmt.Errorf("tool %s: %w", t.ID(), err)
+	}
+	for i, step := range t.Setup {
+		if err := runStep(ctx, t, step, i, p); err != nil {
+			return fmt.Errorf("tool %s: setup step %q: %w", t.ID(), stepLabel(step, i), err)
+		}
+	}
+	return nil
+}
+
+// stageAssets copies the tool's declared helper files (config.Tool.Assets, co-located
+// with the fragment in p.AssetDir) into the step workdir, so a step can reference one
+// as `{workdir}/<name>` — in host steps directly, and in container steps via the
+// workdir bind at /cgtag/work. Staged files are made executable. A missing asset is a
+// clear error. No-op when the tool declares no assets.
+func stageAssets(t config.Tool, p Params) error {
+	for _, a := range t.Assets {
+		src := a
+		if !filepath.IsAbs(src) {
+			if p.AssetDir == "" {
+				return fmt.Errorf("asset %q: no fragment dir to resolve it against", a)
+			}
+			src = filepath.Join(p.AssetDir, a)
+		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return fmt.Errorf("asset %q: %w", a, err)
+		}
+		dst := filepath.Join(p.Workdir, filepath.Base(a))
+		if err := os.WriteFile(dst, data, 0o755); err != nil {
+			return fmt.Errorf("asset %q: %w", a, err)
+		}
+	}
+	return nil
+}
+
+// threadsOf is the per-run thread count (>=1).
+func threadsOf(t config.Tool) int {
+	if t.Batch.Threads > 0 {
+		return t.Batch.Threads
+	}
+	return 1
+}
+
+// replacer builds the host-path template substitutions for a non-container step.
+func replacer(t config.Tool, p Params) *strings.Replacer {
+	return strings.NewReplacer(
+		"{input}", p.Input,
+		"{output}", p.Output,
+		"{workdir}", p.Workdir,
+		"{image}", p.Image,
+		"{ref}", p.Ref,
+		"{datadir}", p.Datadir,
+		"{chrom}", p.Chrom,
+		"{threads}", strconv.Itoa(threadsOf(t)),
+	)
+}
+
+// ctrRoot is the fixed in-container mount root for container steps.
+const ctrRoot = "/cgtag"
+
+// containerMapping binds each of p's host dirs to a fixed, shallow mountpoint under
+// ctrRoot and returns the template replacer (expanding placeholders to those
+// in-container paths) together with the matching `-B host:dest` flags. Decoupling
+// the in-container paths from the deep host paths means the engine only creates
+// shallow /cgtag/* mountpoints — which avoids the engine having to recreate a deep
+// host path inside a read-only image (the cause of INSTALL.pl "Could not create
+// directory" failures) and keeps a registry tool's commands host-independent.
+func containerMapping(t config.Tool, p Params) (*strings.Replacer, []string) {
+	var binds []string
+	bind := func(host, dest string) {
+		if host != "" {
+			binds = append(binds, "-B", host+":"+dest)
+		}
+	}
+
+	data := ctrRoot + "/data"
+	work := ctrRoot + "/work"
+	bind(p.Datadir, data)
+	bind(p.Workdir, work)
+
+	ref := ""
+	if p.Ref != "" {
+		bind(filepath.Dir(p.Ref), ctrRoot+"/ref")
+		ref = ctrRoot + "/ref/" + filepath.Base(p.Ref)
+	}
+	input := ""
+	if p.Input != "" {
+		bind(filepath.Dir(p.Input), ctrRoot+"/in")
+		input = ctrRoot + "/in/" + filepath.Base(p.Input)
+	}
+	// Output is always written under the workdir (filepath.Join(workdir, OutputName)),
+	// so it maps under the workdir bind — no extra mount needed.
+	output := ""
+	if p.Output != "" {
+		output = work + "/" + filepath.Base(p.Output)
+	}
+
+	repl := strings.NewReplacer(
+		"{input}", input,
+		"{output}", output,
+		"{workdir}", work,
+		"{image}", p.Image,
+		"{ref}", ref,
+		"{datadir}", data,
+		"{chrom}", p.Chrom,
+		"{threads}", strconv.Itoa(threadsOf(t)),
+	)
+	return repl, binds
+}
+
+func runStep(ctx context.Context, t config.Tool, step config.Step, idx int, p Params) error {
+	// Container steps render against fixed /cgtag/* mountpoints; host steps use the
+	// real host paths. The script always lives in the (host) workdir.
+	var repl *strings.Replacer
+	var binds []string
+	if step.Container {
+		repl, binds = containerMapping(t, p)
+	} else {
+		repl = replacer(t, p)
+	}
+	run := repl.Replace(step.Run)
+
+	// Write the rendered command to a script so we avoid inline quoting issues
+	// (and so the whole pipeline runs inside the container for container steps).
+	script := filepath.Join(p.Workdir, fmt.Sprintf("step-%d.sh", idx))
+	if err := os.WriteFile(script, []byte("set -euo pipefail\n"+run+"\n"), 0o755); err != nil {
+		return err
+	}
+
+	var inner []string
+	if step.Container {
+		if p.Image == "" {
+			return fmt.Errorf("container step needs an image (set tool.image)")
+		}
+		inner = append([]string{t.ContainerEngine(), "exec", "--no-home"}, binds...)
+		// The script lives in the host workdir, which is bound at /cgtag/work.
+		inner = append(inner, p.Image, "bash", ctrRoot+"/work/"+filepath.Base(script))
+	} else {
+		inner = []string{"bash", script}
+	}
+
+	switch t.Runner {
+	case "", "local":
+		return exec1(ctx, p.Workdir, inner[0], inner[1:]...)
+	case "batch":
+		if t.Batch.Submit == "" {
+			return fmt.Errorf("batch runner needs batch.submit")
+		}
+		submit := strings.NewReplacer(
+			"{cmd}", shellJoin(inner),
+			"{mem}", t.Batch.Mem,
+			"{threads}", strconv.Itoa(maxInt(t.Batch.Threads, 1)),
+			"{walltime}", t.Batch.Walltime,
+		).Replace(t.Batch.Submit)
+		return exec1(ctx, p.Workdir, "bash", "-c", submit)
+	default:
+		return fmt.Errorf("unknown runner %q (want local|batch)", t.Runner)
+	}
+}
+
+// exec1 runs a command, streaming its output to stderr (data flows through
+// files, not stdout).
+func exec1(ctx context.Context, dir, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// ensureIndex builds a tabix index for the output if one isn't present.
+func ensureIndex(path, format string) error {
+	if fileExists(path+".tbi") || fileExists(path+".csi") {
+		return nil
+	}
+	opts, err := preset(format)
+	if err != nil {
+		return err
+	}
+	return tabix.NewIndexWriter(opts).WriteIndex(path)
+}
+
+func preset(format string) (*tabix.WriterOpts, error) {
+	switch format {
+	case "vcf", "":
+		return tabix.NewWriterOpts().VCF(), nil
+	case "tab":
+		return tabix.NewWriterOpts().Columns(1, 2, 0).Meta('#'), nil
+	default:
+		return nil, fmt.Errorf("cannot index tool output of format %q (want vcf|tab)", format)
+	}
+}
+
+// shellJoin single-quotes args for safe embedding in a submit template's {cmd}.
+func shellJoin(args []string) string {
+	q := make([]string, len(args))
+	for i, a := range args {
+		q[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+	}
+	return strings.Join(q, " ")
+}
+
+func stepLabel(s config.Step, i int) string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return strconv.Itoa(i)
+}
+
+func fileExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

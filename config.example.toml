@@ -1,0 +1,45 @@
+# Global cgtag config. Run `cgtag init` to generate this plus a starter snapshot.
+#
+# Under annotations_dir, cgtag keeps reusable sources plus the snapshot manifests
+# that reference them. A source is a data file, a type="builtin" bundle, or a
+# type="tool" external annotator — all under sources/:
+#
+#   <annotations_dir>/
+#     sources/<name>/<version>/<name>-<version>.toml   (+ co-located build/tool assets)
+#     snapshots/<name>.toml                            (manifest: refs + settings)
+#
+# A snapshot is the unit `annotate` runs against and the version stamped on results.
+# See examples/ for a fully worked tree.
+#
+# This file lives in CGTAG_HOME (the -home flag, else $CGTAG_HOME, else the current
+# directory). Values may reference $CGTAG_HOME, which expands to that base dir (or
+# "." when unset). Relative paths also resolve against this file.
+
+data_dir         = "$CGTAG_HOME/data"        # base dir for relative `localpath` source files
+cache_dir        = "$CGTAG_HOME/data/cache"  # downloaded sources + tool images/data cached here,
+                                             # keyed by name/version (set absolute to share across homes)
+default_snapshot = "2026-06"
+annotations_dir  = "./annotations"           # root for sources/, snapshots/ (default: $CGTAG_HOME/annotations)
+# Config registries for `cgtag registry` — each is a static HTTPS registry.toml URL.
+# When unset, the built-in default (compgenlab/cgtag-public-data-registry) is used.
+# registries = [
+#   "https://raw.githubusercontent.com/compgenlab/cgtag-public-data-registry/main/registry.toml",
+#   "https://example.org/my-lab-registry/registry.toml",
+# ]
+
+# The annotation cache is OPTIONAL: omit the whole [database] block and cgtag
+# computes annotations without persisting them (no cgtag.db is written). Add it to
+# memoize results. Cached values are scoped by assembly + data source name:version,
+# so different snapshots share a cache safely and GRCh37/GRCh38 never collide.
+[database]
+backend = "sqlite"                # sqlite (default) | postgres (later)
+path    = "$CGTAG_HOME/cgtag.db"
+
+# Reference FASTAs, keyed by assembly. A snapshot's reference is looked up from its
+# assembly, so all snapshots on one assembly share a single FASTA (no per-snapshot
+# path). Needed by external tools (e.g. VEP) and normalization — not by overlay
+# annotation. Add one table per assembly you use.
+[references.GRCh38]
+fasta = "/data/ref/GRCh38.fa"
+# [references.GRCh37]
+# fasta = "/data/ref/GRCh37.fa"

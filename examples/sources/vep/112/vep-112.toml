@@ -1,0 +1,82 @@
+# A type="tool" source (VEP): a containerized annotator whose output is consumed as a
+# source. `cgtag download` acquires the `image` (a docker:// ref is pulled; a .sif URL
+# is downloaded) and runs [[sources.setup]] once to install the tool's data into its
+# persistent data dir ({datadir}, at cache/tools/<name>/<version>/).
+#
+# A tool is just a source with type="tool": it lives at sources/<name>/<version>/ and a
+# snapshot references it by name:version ("vep:112") in its `sources` list, exactly like
+# a data source. It runs with the snapshot's reference FASTA (from the config's
+# [references.<assembly>]) and its output cache is keyed by name:version + assembly.
+#
+# input_format controls how the query variants are handed to the tool ({input}): the
+# default "vcf" materializes a VCF (below). A per-variant line template
+# (e.g. "{chrom}\t{pos}\t{ref}\t{alt}") is used for tools that take a variant list.
+#
+# Container steps (container = true) run with --no-home and resolve placeholders to
+# FIXED in-container mountpoints, independent of the host layout (cgtag binds the
+# host dirs to them): {datadir}->/cgtag/data, {workdir}->/cgtag/work,
+# {ref}->/cgtag/ref/<file>, {input}->/cgtag/in/<file>, {output}->/cgtag/work/<file>.
+# So `INSTALL.pl -c {datadir}` is portable on any machine. Host steps
+# (container = false) keep real host paths; the workdir is shared between the two.
+#
+# Output is cached per locus: on later `annotate` runs the tool executes only on
+# loci it hasn't seen (under this snapshot's assembly). Bump `version` whenever the
+# image, setup, or steps change — that invalidates the cache.
+#
+# `requires` lists host executables that must be on PATH; `cgtag download` and
+# `cgtag annotate` check them up front and fail fast if any is missing. The
+# container engine (apptainer) is checked automatically, so it need not be listed.
+# Here python3 is needed because the post-processing step runs on the host
+# (container = false), outside the VEP image (bgzip is provided by `cgtag bgzip`).
+#
+# VEP emits a VCF, so format = "vcf": the output is consumed like a vcf source and
+# each annotation pulls an INFO id from it (`field` = the INFO tag in the VEP output,
+# `name` = the new INFO tag written to your annotated VCF). The post-processing
+# scripts expand VEP's packed CSQ field into individual INFO tags and pick the worst
+# consequence, so each tag below can be read directly.
+[[sources]]
+type     = "tool"
+name     = "vep"
+version  = "112"
+image    = "docker://ensemblorg/ensembl-vep"  # pulled by `cgtag download` (or a downloadable .sif URL)
+engine   = "apptainer"                         # or "singularity"
+format   = "vcf"                               # VEP output is a VCF; pull INFO values from it
+# input_format = "vcf"                          # default; a template feeds a variant-list tool
+output   = "vep.vcf.gz"
+runner   = "local"                             # "local" (subprocess) | "batch"
+requires = ["python3"]                         # host deps (bgzip via `cgtag bgzip`, no external binary)
+# Helper scripts co-located with this .toml: staged into {workdir} before each run and
+# referenced as {workdir}/<name> below. Declaring them lets the registry bundle them.
+assets   = ["expand_vep_vcf.py", "vep_vcf_worst_consequence.py"]
+
+  [[sources.setup]]                            # one-time install (cache/FASTA/plugins)
+  name      = "install"
+  container = true
+  run = "INSTALL.pl -c {datadir} -r {datadir}/plugins -a cfp -g CSN -s homo_sapiens -y GRCh38"
+
+  [[sources.steps]]                            # 1) VEP in the container → intermediate VCF
+  name      = "vep"
+  container = true
+  run = "vep -i {input} -o {workdir}/vep.vcf --vcf --everything --symbol --check_existing --offline --cache --force_overwrite --plugin CSN --dir_cache {datadir} --dir_plugins {datadir}/plugins --fasta {ref} --fork {threads}"
+
+  [[sources.steps]]                            # 2) host post-process: expand/rename INFO, pick worst → bgzipped VCF
+  name      = "postprocess"
+  container = false
+  run = "python3 {workdir}/expand_vep_vcf.py < {workdir}/vep.vcf | python3 {workdir}/vep_vcf_worst_consequence.py | cgtag bgzip > {output}"
+
+  # One [[sources.annotations]] per INFO id to pull from the post-processed VCF.
+  # `field` must match the INFO tag your scripts emit; `name` is what gets written.
+  [[sources.annotations]]
+  name  = "vep_consequence"
+  field = "Consequence"                        # INFO id in the VEP output VCF
+  type  = "categorical"
+
+  [[sources.annotations]]
+  name  = "vep_impact"
+  field = "IMPACT"
+  type  = "categorical"
+
+  [[sources.annotations]]
+  name  = "vep_symbol"
+  field = "SYMBOL"
+  type  = "text"

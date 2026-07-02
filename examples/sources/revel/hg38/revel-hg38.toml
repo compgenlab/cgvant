@@ -1,0 +1,36 @@
+# A tab (tabix-indexed TSV) source. `ref_col`/`alt_col` (1-based) are tab-only and
+# optional: set both for allele-aware matching, omit for position-only. The
+# annotation's `field` is the value column number (or a header name).
+#
+# This is the pre-built REVEL file. Compare with revel/1.3, which builds the same
+# data from a recipe — two versions of one source coexisting under sources/revel/,
+# each pinned as revel:hg38 or revel:1.3 by whichever snapshot wants it.
+[[sources]]
+name     = "revel"
+version  = "hg38"
+assembly = "GRCh38"
+format   = "tab"
+url      = "https://.../merged.revel.hg38.txt.gz"
+ref_col  = 3
+alt_col  = 4
+
+  [[sources.annotations]]
+  name  = "revel"
+  field = "7"
+  type  = "numeric"
+
+# A union of files (Source.files): one source, several files all queried + merged
+# (e.g. coding + indels). Each file carries its own url/localpath/checksum.
+# [[sources]]
+# name    = "dbnsfp"
+# version = "4.7"
+# format  = "tab"
+# ref_col = 3
+# alt_col = 4
+#   [[sources.files]]
+#   url = "https://.../dbNSFP4.7a_coding.gz"
+#   [[sources.files]]
+#   url = "https://.../dbNSFP4.7a_indels.gz"
+#   [[sources.annotations]]
+#   name  = "sift_pred"
+#   field = "5"

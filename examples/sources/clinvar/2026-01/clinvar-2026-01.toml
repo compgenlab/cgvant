@@ -1,0 +1,29 @@
+# A vcf source: annotations nest under it (no `source =` field). Each pulls an
+# INFO field, the record ID (@ID), or presence (type = "flag"). For vcf,
+# `match = "exact"` (REF+ALT, the default) or `"position"`; `unique = true`
+# de-duplicates multiple matches.
+#
+# This is a reusable, top-level source: it lives at sources/<name>/<version>/ and
+# is referenced by name:version ("clinvar:2026-01") from any snapshot that wants
+# it. Which of its annotations apply by default is decided per-snapshot (in the
+# snapshot's `default_annotations`), NOT here.
+[[sources]]
+name      = "clinvar"
+version   = "2026-01"
+assembly  = "GRCh38"          # verified against the including snapshot's assembly
+format    = "vcf"
+url       = "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz"
+url_index = "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz.tbi"
+# checksum / checksum_index are optional, "<algo>:<hex-or-url>" (md5|sha1|sha256);
+# a URL value is fetched + parsed (md5sum-style manifest or a single hash).
+
+  [[sources.annotations]]
+  name        = "clinvar_sig"      # exact REF+ALT match → CLNSIG value
+  field       = "CLNSIG"
+  type        = "categorical"
+  description = "ClinVar clinical significance"
+
+  [[sources.annotations]]
+  name  = "clinvar_pos"            # any variant at this locus (position-only flag)
+  type  = "flag"
+  match = "position"

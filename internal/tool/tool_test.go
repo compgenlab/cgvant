@@ -1,0 +1,173 @@
+package tool
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/compgenlab/hts/htsio/tabix"
+
+	"github.com/compgenlab/cgtag/internal/config"
+)
+
+// TestContainerMapping: a container step binds each host dir to a fixed /cgtag/*
+// mountpoint and renders the placeholders to those in-container paths (host-
+// independent, so the engine never recreates a deep host path inside the image).
+func TestContainerMapping(t *testing.T) {
+	p := Params{
+		Datadir: "/home/u/deep/cache/tools/vep/113",
+		Workdir: "/tmp/cgtag-xyz",
+		Ref:     "/refs/GRCh38.fa",
+		Input:   "/data/in.vcf",
+		Output:  "/tmp/cgtag-xyz/vep.vcf.gz",
+		Image:   "/img/vep.sif",
+	}
+	repl, binds := containerMapping(config.Tool{}, p)
+
+	wantBinds := []string{
+		"-B", "/home/u/deep/cache/tools/vep/113:/cgtag/data",
+		"-B", "/tmp/cgtag-xyz:/cgtag/work",
+		"-B", "/refs:/cgtag/ref",
+		"-B", "/data:/cgtag/in",
+	}
+	if strings.Join(binds, " ") != strings.Join(wantBinds, " ") {
+		t.Errorf("binds = %v\nwant %v", binds, wantBinds)
+	}
+
+	got := repl.Replace("vep -i {input} -o {output} --dir_cache {datadir} --fasta {ref} --work {workdir}")
+	want := "vep -i /cgtag/in/in.vcf -o /cgtag/work/vep.vcf.gz --dir_cache /cgtag/data --fasta /cgtag/ref/GRCh38.fa --work /cgtag/work"
+	if got != want {
+		t.Errorf("render =\n %q\nwant\n %q", got, want)
+	}
+}
+
+// TestStageAssets: a declared asset (co-located in AssetDir) is staged into the
+// workdir and a host step runs it explicitly as {workdir}/<name> — no PATH reliance.
+func TestStageAssets(t *testing.T) {
+	dir := t.TempDir()
+	assetDir := filepath.Join(dir, "frag")
+	workdir := filepath.Join(dir, "wd")
+	for _, d := range []string{assetDir, workdir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker := filepath.Join(dir, "ran")
+	// A helper script co-located with the fragment; the step invokes it by workdir path.
+	if err := os.WriteFile(filepath.Join(assetDir, "helper.sh"),
+		[]byte("#!/bin/sh\necho hi > \""+marker+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl := config.Tool{
+		Name: "t", Version: "1", Runner: "local",
+		Assets: []string{"helper.sh"},
+		Setup:  []config.Step{{Name: "run", Run: "sh {workdir}/helper.sh"}},
+	}
+	if err := Setup(context.Background(), tl, Params{Workdir: workdir, AssetDir: assetDir}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "helper.sh")); err != nil {
+		t.Errorf("asset not staged into workdir: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("staged asset did not run (marker missing): %v", err)
+	}
+	// A declared-but-missing asset is a clear error.
+	bad := config.Tool{Name: "t", Version: "1", Assets: []string{"nope.sh"},
+		Setup: []config.Step{{Run: "true"}}}
+	if err := Setup(context.Background(), bad, Params{Workdir: workdir, AssetDir: assetDir}); err == nil {
+		t.Error("expected error for missing asset")
+	}
+}
+
+// TestSetupLocal: a setup step resolves {datadir} and runs (installing tool data).
+func TestSetupLocal(t *testing.T) {
+	dir := t.TempDir()
+	datadir := filepath.Join(dir, "data")
+	if err := os.MkdirAll(datadir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tl := config.Tool{
+		Name: "vep", Version: "112", Runner: "local",
+		Setup: []config.Step{{Name: "install", Run: "touch {datadir}/installed"}},
+	}
+	if err := Setup(context.Background(), tl, Params{Datadir: datadir, Workdir: dir}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(datadir, "installed")); err != nil {
+		t.Errorf("setup did not create {datadir}/installed: %v", err)
+	}
+}
+
+// prebuiltTab writes a tiny indexed tab file the fake tool steps will copy.
+func prebuiltTab(t *testing.T, dir string) string {
+	t.Helper()
+	p := filepath.Join(dir, "pre.tab.gz")
+	w := tabix.NewWriter(p, tabix.NewWriterOpts().Columns(1, 2, 0).AutoIndex())
+	if err := w.Write("chr1\t100\tA\tG\t0.5"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// copyStep is a step that "produces" the output by copying the prebuilt file.
+func copyStep(pre string) config.Step {
+	return config.Step{Name: "produce", Run: "cp " + pre + " {output}; cp " + pre + ".tbi {output}.tbi"}
+}
+
+func runOK(t *testing.T, tl config.Tool, dir string) {
+	t.Helper()
+	out := filepath.Join(dir, "out.tab.gz")
+	if err := Run(context.Background(), tl, Params{Output: out, Workdir: dir}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	r, err := tabix.NewReader(out)
+	if err != nil {
+		t.Fatalf("output not a valid tabix file: %v", err)
+	}
+	r.Close()
+}
+
+func TestRunLocal(t *testing.T) {
+	dir := t.TempDir()
+	pre := prebuiltTab(t, dir)
+	runOK(t, config.Tool{
+		Name: "x", Version: "1", Format: "tab",
+		Runner: "local",
+		Steps:  []config.Step{copyStep(pre)},
+	}, dir)
+}
+
+func TestRunBatchTemplate(t *testing.T) {
+	dir := t.TempDir()
+	pre := prebuiltTab(t, dir)
+	// A no-op "scheduler": the submit template just runs {cmd} locally.
+	runOK(t, config.Tool{
+		Name: "x", Version: "1", Format: "tab",
+		Runner: "batch",
+		Batch:  config.ToolBatch{Submit: "{cmd}"},
+		Steps:  []config.Step{copyStep(pre)},
+	}, dir)
+}
+
+func TestContainerStepNeedsImage(t *testing.T) {
+	dir := t.TempDir()
+	err := Run(context.Background(), config.Tool{
+		Name: "x", Version: "1", Format: "tab",
+		Steps: []config.Step{{Run: "true", Container: true}},
+	}, Params{Output: filepath.Join(dir, "o.gz"), Workdir: dir})
+	if err == nil {
+		t.Fatal("expected error for a container step without an image")
+	}
+}
+
+func TestNoSteps(t *testing.T) {
+	if err := Run(context.Background(), config.Tool{Name: "x", Version: "1"}, Params{}); err == nil {
+		t.Fatal("expected error for a tool with no steps")
+	}
+}

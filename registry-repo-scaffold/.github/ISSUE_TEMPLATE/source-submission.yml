@@ -1,0 +1,37 @@
+# Manual fallback for contributing a source without `cgtag registry submit`.
+# Filing this (it auto-applies the `source-submission` label) triggers issue-to-pr.
+name: Source submission
+description: Propose an annotation source for the cgtag registry
+title: "source: <name>@<version>"
+labels: [source-submission]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Prefer `cgtag registry submit <release> <source>`, which fills this in for you.
+        Otherwise paste the source's config (a `[[sources]]` block + its
+        `[[annotations]]`) in the TOML field below.
+  - type: textarea
+    id: snippet
+    attributes:
+      label: Source config (TOML)
+      description: A config snippet — one [[sources]] entry and its [[annotations]].
+      render: toml
+      placeholder: |
+        [[sources]]
+        name      = "clinvar"
+        version   = "2026-01"
+        assembly  = "GRCh38"
+        format    = "vcf"
+        url       = "https://.../clinvar.vcf.gz"
+        index_url = "https://.../clinvar.vcf.gz.tbi"
+        checksum  = "md5:<hex-or-url>"   # required (md5|sha1|sha256)
+
+        [[annotations]]
+        key         = "clinvar_sig"
+        source      = "clinvar"
+        field       = "CLNSIG"
+        type        = "categorical"
+        description = "ClinVar clinical significance"
+    validations:
+      required: true

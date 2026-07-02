@@ -1,0 +1,21 @@
+# A multi-file source: one file per chromosome via the {chrom} template. `chroms`
+# lists the files; {chrom} is expanded in url/url_index/checksum. At annotate time
+# each locus is routed to its chromosome's file.
+[[sources]]
+name     = "gnomad"
+version  = "4.1"
+assembly = "GRCh38"
+format   = "vcf"
+url      = "https://.../gnomad.genomes.v4.1.sites.{chrom}.vcf.bgz"
+checksum = "sha256:https://.../gnomad.genomes.v4.1.sites.{chrom}.vcf.bgz.sha256"
+chroms   = ["chr1", "chr2", "chr3", "chrX"]   # … list every file you ship
+
+  [[sources.annotations]]
+  name  = "gnomad_af"
+  field = "AF"
+  type  = "numeric"
+
+  [[sources.annotations]]
+  name  = "gnomad_af_nfe"
+  field = "AF_nfe"
+  type  = "numeric"

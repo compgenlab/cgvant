@@ -1,0 +1,125 @@
+# Converts a `source-submission` issue (filed by `cgtag registry submit`) into a PR:
+# parses the ```toml block, writes the source config + registry.toml entry, opens a PR
+# that closes the issue. A maintainer reviews and merges.
+name: issue-to-pr
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  build-pr:
+    if: github.event.label.name == 'source-submission'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract submission into files
+        id: extract
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python3 - <<'PY'
+          import os, re, io, base64, tarfile, tomllib, pathlib
+
+          body = os.environ["ISSUE_BODY"]
+          num = os.environ["ISSUE_NUMBER"]
+
+          m = re.search(r"```toml\s*\n(.*?)```", body, re.DOTALL)
+          if not m:
+              raise SystemExit("no ```toml block found in the issue body")
+          snippet = m.group(1)
+          data = tomllib.loads(snippet)
+
+          # A submission is one [[sources]] fragment (a tool is just type="tool").
+          if not data.get("sources"):
+              raise SystemExit("snippet has no [[sources]]")
+          item = data["sources"][0]
+          name, version = item["name"], item["version"]
+          assembly = item.get("assembly", "")
+          anns = item.get("annotations", [])
+          desc = anns[0].get("description", "") if anns else ""
+
+          # Layout: sources/<name>/<version>/<name>-<version>.toml (version in the dir;
+          # self-identifying filename). The client loads whatever `file` says.
+          rel = f"sources/{name}/{version}/{name}-{version}.toml"
+          p = pathlib.Path(rel)
+          p.parent.mkdir(parents=True, exist_ok=True)
+          p.write_text(snippet)
+
+          # Unpack any helper assets (base64 tar.gz) as individual files next to the
+          # fragment. Member names are flattened to a basename (no path traversal).
+          am = re.search(r"```assets\.tar\.gz\.base64\s*\n(.*?)```", body, re.DOTALL)
+          if am:
+              raw = base64.b64decode("".join(am.group(1).split()))
+              with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tf:
+                  for mem in tf.getmembers():
+                      if not mem.isfile():
+                          continue
+                      dst = p.parent / os.path.basename(mem.name)
+                      dst.write_bytes(tf.extractfile(mem).read())
+                      dst.chmod(0o755)
+
+          # Rewrite registry.toml: replace any prior (name, version) entry under
+          # [[sources]], mark this version `latest = true`, and clear `latest` on other
+          # versions of the same name (a submission is the newest; a maintainer can
+          # adjust in review). Tool sources live under [[sources]] too.
+          reg = pathlib.Path("registry.toml")
+          doc = tomllib.loads(reg.read_text()) if reg.exists() else {}
+          entries = [e for e in doc.get("sources", [])
+                     if not (e.get("name") == name and e.get("version") == version)]
+          for e in entries:
+              if e.get("name") == name:
+                  e.pop("latest", None)
+          new = {"name": name, "version": version, "file": rel,
+                 "description": desc, "latest": True}
+          if assembly:
+              new["assembly"] = assembly
+          entries.append(new)
+
+          def emit(table, items):
+              out = []
+              for e in items:
+                  out.append(f"[[{table}]]")
+                  for k in ("name", "version", "assembly", "file", "description"):
+                      if e.get(k):
+                          out.append(f'{k} = "{e[k]}"')
+                  if e.get("latest"):
+                      out.append("latest = true")
+                  out.append("")
+              return "\n".join(out)
+
+          sections = {"snapshots": doc.get("snapshots", []), "sources": entries}
+          text = "# cgtag registry catalog — auto-maintained by the issue-to-pr workflow.\n\n"
+          for tbl in ("snapshots", "sources"):
+              text += emit(tbl, sections[tbl])
+          reg.write_text(text.rstrip() + "\n")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"name={name}\nversion={version}\nbranch=submit/{name}-{version}-{num}\n")
+          PY
+
+      # Opens the PR with a fine-grained PAT (secrets.REGISTRY_PR_SECRET, scoped to
+      # this repo: Pull requests + Contents read/write) rather than the default
+      # GITHUB_TOKEN. The org forbids Actions from creating PRs ("GitHub Actions is
+      # not permitted to create or approve pull requests"); a user token is not
+      # subject to that policy. See README setup.
+      - name: Open pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.REGISTRY_PR_SECRET }}
+          branch: ${{ steps.extract.outputs.branch }}
+          base: main
+          title: "Add source ${{ steps.extract.outputs.name }}@${{ steps.extract.outputs.version }}"
+          body: |
+            Adds `${{ steps.extract.outputs.name }}@${{ steps.extract.outputs.version }}` from #${{ github.event.issue.number }}.
+
+            Closes #${{ github.event.issue.number }}
+          labels: source-submission
+          commit-message: "Add source ${{ steps.extract.outputs.name }}@${{ steps.extract.outputs.version }}"

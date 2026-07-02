@@ -1,0 +1,34 @@
+# A snapshot manifest: the unit `annotate` runs against, and the version stamped on
+# results. It references reusable sources by name:version and holds the snapshot-scoped
+# settings. A source (e.g. clinvar:2026-01) can be shared by many snapshots — it lives
+# once under sources/, listed here by reference. Tools are sources too (type="tool",
+# e.g. vep:112), so they go in the same `sources` list.
+#
+# A snapshot is inherently assembly-specific, so `assembly` lives here. It scopes the
+# annotation cache (a GRCh37 and a GRCh38 snapshot never share cached values at the
+# same chrom:pos) and selects the reference FASTA: the VEP tool's reference is looked
+# up from the config's [references.GRCh38] by this assembly — not pinned here.
+
+description = "GRCh38 clinical annotation set"
+assembly    = "GRCh38"
+
+# name:version → sources/<name>/<version>/<name>-<version>.toml. Apply order = list
+# order. A bare name (no :version) resolves to the sole version on disk. Tool sources
+# (vep:112) sit in this same list.
+sources = [
+  "builtins:1",
+  "clinvar:2026-01",
+  "gnomad:4.1",
+  "dbsnp:b156",
+  "revel:1.3",       # the built recipe; revel:hg38 is also on disk but unused here
+  "vep:112",         # a type="tool" source
+]
+
+# The annotations applied when `annotate` runs without --all / -a. Every name must
+# be provided by one of the sources above. Managed here (not on the source), so the
+# same source can be default in one snapshot and opt-in in another.
+default_annotations = [
+  "clinvar_sig",
+  "gnomad_af",
+  "vep_consequence",
+]

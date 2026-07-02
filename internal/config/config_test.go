@@ -1,0 +1,770 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/BurntSushi/toml"
+)
+
+func TestSelectAnnotations(t *testing.T) {
+	snap := &Snapshot{Annotations: []Annotation{
+		{Name: "a", Default: true}, {Name: "b"}, {Name: "c", Default: true},
+	}}
+	if got, _ := snap.SelectAnnotations(nil, true); len(got) != 3 {
+		t.Errorf("all = %d, want 3", len(got))
+	}
+	def, _ := snap.SelectAnnotations(nil, false)
+	if len(def) != 2 || def[0].Name != "a" || def[1].Name != "c" {
+		t.Errorf("default set = %+v, want [a c]", def)
+	}
+	ex, err := snap.SelectAnnotations([]string{"b"}, false)
+	if err != nil || len(ex) != 1 || ex[0].Name != "b" {
+		t.Errorf("explicit = %+v err=%v", ex, err)
+	}
+	if _, err := snap.SelectAnnotations([]string{"zzz"}, false); err == nil {
+		t.Error("expected an unknown-key error")
+	}
+}
+
+func TestReflowLongArrays(t *testing.T) {
+	in := strings.Join([]string{
+		`requires = ["unzip", "python3", "bgzip"]`,
+		`chroms = ["1", "2", "X", "Y"]`,
+		`  inputs = ["https://example.com/revel-v1.3_chrom_21_042749014_048084282.csv.zip", "https://example.com/revel-v1.3_chrom_22.csv.zip"]`,
+		`empty = []`,
+	}, "\n")
+	got := reflowLongArrays(in)
+	want := strings.Join([]string{
+		`requires = ["unzip", "python3", "bgzip"]`, // short elements: stays inline
+		`chroms = ["1", "2", "X", "Y"]`,            // short elements: stays inline
+		`  inputs = [`,                             // long URL elements: wrapped, indent preserved
+		`    "https://example.com/revel-v1.3_chrom_21_042749014_048084282.csv.zip",`,
+		`    "https://example.com/revel-v1.3_chrom_22.csv.zip",`,
+		`  ]`,
+		`empty = []`, // empty: untouched
+	}, "\n")
+	if got != want {
+		t.Errorf("reflowLongArrays mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+func TestReflowLongArraysRoundTrips(t *testing.T) {
+	snap := &Snapshot{Sources: []Source{{
+		Name: "revel", Version: "1.3", Format: "tab",
+		Build: &SourceBuild{
+			Output: "out.txt.gz",
+			Inputs: []string{
+				"https://example.com/revel-v1.3_chrom_21_042749014_048084282.csv.zip",
+				"https://example.com/revel-v1.3_chrom_22_016157310_025437413.csv.zip",
+			},
+			Run: []string{"unzip {inputs}/*.zip", "python3 conv.py | bgzip > {output}"},
+		},
+	}}}
+	out, err := MarshalSnapshot(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "inputs = [\n") {
+		t.Errorf("expected inputs reflowed to multi-line, got:\n%s", out)
+	}
+	// The reflowed TOML must still decode to the same inputs.
+	var got Snapshot
+	if _, err := toml.Decode(out, &got); err != nil {
+		t.Fatalf("reflowed TOML does not parse: %v\n%s", err, out)
+	}
+	if len(got.Sources) != 1 || len(got.Sources[0].Build.Inputs) != 2 {
+		t.Errorf("round-trip lost data: %+v", got.Sources)
+	}
+}
+
+func TestIDUsesColon(t *testing.T) {
+	if got := (Source{Name: "revel", Version: "1.3"}).ID(); got != "revel:1.3" {
+		t.Errorf("Source.ID() = %q, want revel:1.3", got)
+	}
+	if got := (Tool{Name: "vep", Version: "113"}).ID(); got != "vep:113" {
+		t.Errorf("Tool.ID() = %q, want vep:113", got)
+	}
+}
+
+// TestToolDataDirUsesNameVersion: the on-disk tool data dir is name/version (like
+// the image cache), never the ":" ID — a ":" in a directory path is unsafe.
+func TestToolDataDirUsesNameVersion(t *testing.T) {
+	cfg := &Config{DataDir: t.TempDir()}
+	got := cfg.ResolveToolData(Tool{Name: "vep", Version: "113"})
+	if !strings.HasSuffix(got, filepath.Join("tools", "vep", "113")) {
+		t.Errorf("ResolveToolData = %q, want suffix tools/vep/113", got)
+	}
+	if strings.ContainsRune(got, ':') {
+		t.Errorf("tool data dir must not contain ':' — %q", got)
+	}
+}
+
+func TestToolRequiredSoftware(t *testing.T) {
+	// Container tool: engine is appended automatically and deduped.
+	ct := Tool{Requires: []string{"python3", "bgzip", "apptainer"}, Steps: []Step{{Container: true}}}
+	got := ct.RequiredSoftware()
+	want := []string{"python3", "bgzip", "apptainer"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("container tool = %v, want %v", got, want)
+	}
+
+	// Container tool that doesn't list the engine: it's added.
+	it := Tool{Requires: []string{"python3"}, Image: "docker://x"}
+	if got := it.RequiredSoftware(); strings.Join(got, ",") != "python3,apptainer" {
+		t.Errorf("image tool = %v, want [python3 apptainer]", got)
+	}
+
+	// Non-container tool: no engine appended.
+	nt := Tool{Requires: []string{"python3"}, Steps: []Step{{Container: false}}}
+	if got := nt.RequiredSoftware(); strings.Join(got, ",") != "python3" {
+		t.Errorf("non-container tool = %v, want [python3]", got)
+	}
+}
+
+func TestDropSource(t *testing.T) {
+	snap := &Snapshot{Sources: []Source{
+		{Name: "clinvar", Version: "1", Annotations: []Annotation{{Name: "sig"}, {Name: "sig2"}}},
+		{Name: "gnomad", Version: "4", Annotations: []Annotation{{Name: "af"}}},
+	}}
+	snap.Normalize()
+	if removed := snap.DropSource("clinvar"); removed != 2 {
+		t.Errorf("removed = %d, want 2", removed)
+	}
+	if len(snap.Sources) != 1 || snap.Sources[0].Name != "gnomad" {
+		t.Errorf("sources = %+v", snap.Sources)
+	}
+	if len(snap.Annotations) != 1 || snap.Annotations[0].Name != "af" {
+		t.Errorf("annotations = %+v, want only af", snap.Annotations)
+	}
+}
+
+func TestNormalizeSetsSource(t *testing.T) {
+	snap := &Snapshot{
+		Sources: []Source{
+			{Name: "clinvar", Version: "1", Annotations: []Annotation{{Name: "sig"}}},
+			{Type: "builtin", Annotations: []Annotation{{Builtin: "tstv"}}},
+			{Type: "tool", Name: "vep", Version: "1", Steps: []Step{{Run: "x"}},
+				Annotations: []Annotation{{Name: "csq"}}},
+		},
+	}
+	snap.Normalize()
+	got := map[string]string{}
+	for _, a := range snap.Annotations {
+		got[a.Source] = a.Name // key empty for builtin
+	}
+	if _, ok := got["clinvar"]; !ok {
+		t.Errorf("clinvar annotation missing source: %+v", snap.Annotations)
+	}
+	if _, ok := got["tstv"]; !ok {
+		t.Errorf("builtin source not set to tstv: %+v", snap.Annotations)
+	}
+	if _, ok := got["vep"]; !ok {
+		t.Errorf("tool annotation missing source vep: %+v", snap.Annotations)
+	}
+}
+
+func TestResolveSourceFiles(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CGTAG_HOME", "")
+	path := writeConfig(t, dir, "assembly = \"GRCh38\"\ndata_dir = \"data\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	single := cfg.ResolveSourceFiles(Source{Name: "clinvar", Version: "1", URL: "https://x/clinvar.vcf.gz"})
+	if len(single) != 1 || single[0].Chrom != "" || single[0].Local {
+		t.Errorf("single-file = %+v", single)
+	}
+	// localpath ⇒ Local file, used exactly.
+	loc := cfg.ResolveSourceFiles(Source{Name: "g", Version: "1", URL: "https://x/g.vcf.gz", LocalPath: "/data/g.vcf.gz"})
+	if len(loc) != 1 || !loc[0].Local || loc[0].Path != "/data/g.vcf.gz" {
+		t.Errorf("localpath = %+v", loc)
+	}
+	multi := cfg.ResolveSourceFiles(Source{
+		Name: "gnomad", Version: "4", URL: "https://x/g.{chrom}.vcf.gz",
+		Checksum: "md5:https://x/g.{chrom}.md5", Chroms: []string{"chr1", "chr2"},
+	})
+	if len(multi) != 2 || multi[0].Chrom != "chr1" {
+		t.Fatalf("multi-file = %+v", multi)
+	}
+	if !strings.Contains(multi[0].URL, "g.chr1.vcf.gz") || !strings.Contains(multi[0].Checksum, "g.chr1.md5") {
+		t.Errorf("chr1 expansion = url:%q checksum:%q", multi[0].URL, multi[0].Checksum)
+	}
+	union := cfg.ResolveSourceFiles(Source{Name: "dbnsfp", Version: "4", Files: []FileSpec{
+		{URL: "https://x/coding.tsv.gz", Checksum: "md5:abc"},
+		{URL: "https://x/indels.tsv.gz", Checksum: "md5:def"},
+	}})
+	if len(union) != 2 || !strings.Contains(union[0].Path, "coding.tsv.gz") || union[1].Checksum != "md5:def" {
+		t.Errorf("files union = %+v", union)
+	}
+}
+
+func writeConfig(t *testing.T, dir, body string) string {
+	t.Helper()
+	// These tests place fragments directly under dir/sources|tools|snapshots (see
+	// writeSnapshot), so pin annotations_dir to "." unless the body overrides it —
+	// the production default is now "annotations".
+	if !strings.Contains(body, "annotations_dir") {
+		body = "annotations_dir = \".\"\n" + body
+	}
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// writeSnapshot writes a source/tool fragment body into the v2 top-level tree
+// (sources/<name>/<version>/… or tools/…) and appends a name:version ref to the
+// snapshots/<snap>.toml manifest. `frag` (the legacy filename) is ignored.
+func writeSnapshot(t *testing.T, dir, snap, frag, body string) {
+	t.Helper()
+	_ = frag
+	var f Snapshot
+	if _, err := toml.Decode(body, &f); err != nil {
+		t.Fatalf("decode fragment: %v", err)
+	}
+	if len(f.Sources) == 0 {
+		t.Fatalf("fragment has no source: %s", body)
+	}
+	s := f.Sources[0] // data, builtin, or tool source
+	name, ver := s.Name, s.Version
+	if s.IsBuiltinSource() && name == "" {
+		name, ver = "builtins", "1"
+	}
+	file := filepath.Join(dir, "sources", name, ver, name+"-"+ver+".toml")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Append the ref to the manifest (create it if absent).
+	mpath := filepath.Join(dir, "snapshots", snap+".toml")
+	sc := &SnapshotConfig{}
+	if b, err := os.ReadFile(mpath); err == nil {
+		toml.Decode(string(b), sc)
+	}
+	ref := name + ":" + ver
+	has := false
+	for _, r := range sc.Sources {
+		if r == ref {
+			has = true
+		}
+	}
+	if !has {
+		sc.Sources = append(sc.Sources, ref)
+	}
+	if err := os.MkdirAll(filepath.Dir(mpath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSnapshotConfig(mpath, sc); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadAndSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CGTAG_HOME", "")
+	path := writeConfig(t, dir, `
+assembly = "GRCh38"
+data_dir = "data"
+default_snapshot = "2026-06"
+[database]
+backend = "sqlite"
+`)
+	writeSnapshot(t, dir, "2026-06", "01_clinvar.toml", `
+[[sources]]
+name = "clinvar"
+version = "2026-01"
+format = "vcf"
+localpath = "clinvar/clinvar.vcf.gz"
+  [[sources.annotations]]
+  name = "clinvar_sig"
+  field = "CLNSIG"
+  type = "categorical"
+  [[sources.annotations]]
+  name = "af"
+  type = "numeric"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Database.Backend != "sqlite" || cfg.Database.Path != "cgtag.db" {
+		t.Errorf("defaults wrong: %+v", cfg.Database)
+	}
+
+	snap, err := cfg.LoadSnapshot("") // default
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Name != "2026-06" || len(snap.Sources) != 1 {
+		t.Fatalf("snapshot: %+v", snap)
+	}
+	if snap.Sources[0].ID() != "clinvar:2026-01" {
+		t.Errorf("source id = %q", snap.Sources[0].ID())
+	}
+	if len(snap.Annotations) != 2 || snap.Annotations[0].Source != "clinvar" {
+		t.Fatalf("flat annotations = %+v", snap.Annotations)
+	}
+	if snap.Annotations[1].FieldName() != "af" || !snap.Annotations[1].IsNumeric() {
+		t.Errorf("af annotation = %+v", snap.Annotations[1])
+	}
+	want := filepath.Join(dir, "data", "clinvar/clinvar.vcf.gz")
+	if got := cfg.ResolveSourcePath(snap.Sources[0]); got != want {
+		t.Errorf("ResolveSourcePath = %q, want %q", got, want)
+	}
+}
+
+func TestResolveSourcePathCacheVsLocal(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "assembly = \"GRCh38\"\ndata_dir = \"data\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached := cfg.ResolveSourcePath(Source{Name: "clinvar", Version: "2026-01", URL: "https://ex.org/clinvar.vcf.gz"})
+	want := filepath.Join(dir, "data", "cache", "clinvar", "2026-01", "clinvar.vcf.gz")
+	if cached != want {
+		t.Errorf("cache path = %q, want %q", cached, want)
+	}
+	expl := cfg.ResolveSourcePath(Source{Name: "g", Version: "1", LocalPath: "g/g.bed.gz"})
+	if expl != filepath.Join(dir, "data", "g/g.bed.gz") {
+		t.Errorf("localpath = %q", expl)
+	}
+	if got := cfg.ResolveSourcePath(Source{LocalPath: "/abs/x.gz"}); got != "/abs/x.gz" {
+		t.Errorf("absolute localpath = %q, want /abs/x.gz", got)
+	}
+}
+
+func TestLocalPathEnvExpansion(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "assembly = \"GRCh38\"\ndata_dir = \"data\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MYDATA", "/srv/refs")
+	// Absolute after expansion → used as-is.
+	if got := cfg.ResolveSourcePath(Source{LocalPath: "${MYDATA}/clinvar.vcf.gz"}); got != "/srv/refs/clinvar.vcf.gz" {
+		t.Errorf("env localpath = %q, want /srv/refs/clinvar.vcf.gz", got)
+	}
+	// $VAR form + index path.
+	if got := cfg.resolveLocalIndex(Source{LocalPathIndex: "$MYDATA/clinvar.vcf.gz.tbi"}); got != "/srv/refs/clinvar.vcf.gz.tbi" {
+		t.Errorf("env localpath_index = %q", got)
+	}
+	// Relative after expansion → joined under data_dir.
+	t.Setenv("SUB", "sub")
+	if got := cfg.ResolveSourcePath(Source{LocalPath: "${SUB}/x.gz"}); got != filepath.Join(dir, "data", "sub/x.gz") {
+		t.Errorf("relative env localpath = %q", got)
+	}
+}
+
+func TestLoadInterpolatesCgtagHome(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfig(t, dir, `
+assembly = "GRCh38"
+data_dir = "$CGTAG_HOME/data"
+[database]
+backend = "sqlite"
+path = "${CGTAG_HOME}/cgtag.db"
+[references.GRCh38]
+fasta = "$KEEP_ME/ref.fa"
+`)
+
+	t.Setenv("CGTAG_HOME", "/home/x")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DataDir != "/home/x/data" {
+		t.Errorf("data_dir = %q, want /home/x/data", cfg.DataDir)
+	}
+	if cfg.Database.Path != "/home/x/cgtag.db" {
+		t.Errorf("database.path = %q, want /home/x/cgtag.db", cfg.Database.Path)
+	}
+	if got := cfg.ReferenceFor("GRCh38"); got != "${KEEP_ME}/ref.fa" {
+		t.Errorf("fasta = %q, want ${KEEP_ME}/ref.fa", got)
+	}
+}
+
+func TestLoadCgtagHomeDefaultsToDot(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "assembly = \"GRCh38\"\ndata_dir = \"$CGTAG_HOME/data\"\n")
+	t.Setenv("CGTAG_HOME", "")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DataDir != "./data" {
+		t.Errorf("data_dir = %q, want ./data", cfg.DataDir)
+	}
+}
+
+func TestDatabasePathAbs(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CGTAG_HOME", "")
+
+	rel := writeConfig(t, dir, "assembly = \"GRCh38\"\n[database]\nbackend = \"sqlite\"\npath = \"cgtag.db\"\n")
+	cfg, err := Load(rel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := cfg.DatabasePathAbs(), filepath.Join(dir, "cgtag.db"); got != want {
+		t.Errorf("relative DatabasePathAbs = %q, want %q", got, want)
+	}
+
+	abs := writeConfig(t, dir, "assembly = \"GRCh38\"\n[database]\nbackend = \"sqlite\"\npath = \"/var/lib/v.db\"\n")
+	cfg, err = Load(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.DatabasePathAbs(); got != "/var/lib/v.db" {
+		t.Errorf("absolute DatabasePathAbs = %q, want /var/lib/v.db", got)
+	}
+
+	cfg.Database.Backend = "postgres"
+	cfg.Database.Path = "postgres://u@h/db"
+	if got := cfg.DatabasePathAbs(); got != "postgres://u@h/db" {
+		t.Errorf("postgres DatabasePathAbs = %q, want the DSN verbatim", got)
+	}
+}
+
+// TestSnapshotReferenceFromAssembly: a snapshot's reference FASTA is looked up from
+// the config's per-assembly [references.<assembly>] map, keyed by the snapshot's
+// assembly — not pinned in the manifest.
+func TestSnapshotReferenceFromAssembly(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CGTAG_HOME", "")
+	path := writeConfig(t, dir, `
+default_snapshot = "r"
+[references.GRCh38]
+fasta = "/ref/GRCh38.fa"
+[references.GRCh37]
+fasta = "/ref/GRCh37.fa"
+`)
+	if err := WriteSnapshotConfig(filepath.Join(dir, "snapshots", "r.toml"), &SnapshotConfig{Assembly: "GRCh37"}); err != nil {
+		t.Fatal(err)
+	}
+	writeSnapshot(t, dir, "r", "x.toml", `
+[[sources]]
+name = "x"
+version = "1"
+assembly = "GRCh37"
+format = "vcf"
+localpath = "x.vcf.gz"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := cfg.LoadSnapshot("r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Reference != "/ref/GRCh37.fa" {
+		t.Errorf("snapshot reference = %q, want /ref/GRCh37.fa (from its GRCh37 assembly)", snap.Reference)
+	}
+}
+
+func TestSourceAssemblyVerification(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CGTAG_HOME", "")
+	path := writeConfig(t, dir, "default_snapshot = \"r\"\n[database]\nbackend = \"sqlite\"\n")
+
+	// Assembly is per-snapshot now: the manifest carries it (writeSnapshot preserves it).
+	if err := WriteSnapshotConfig(filepath.Join(dir, "snapshots", "r.toml"), &SnapshotConfig{Assembly: "GRCh38"}); err != nil {
+		t.Fatal(err)
+	}
+
+	writeSnapshot(t, dir, "r", "01_clinvar.toml", `
+[[sources]]
+name = "clinvar"
+version = "1"
+assembly = "GRCh37"
+format = "vcf"
+localpath = "c.vcf.gz"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.LoadSnapshot("r"); err == nil {
+		t.Fatal("expected an assembly-mismatch error")
+	}
+
+	writeSnapshot(t, dir, "r", "01_clinvar.toml", `
+[[sources]]
+name = "clinvar"
+version = "1"
+assembly = "GRCh38"
+format = "vcf"
+localpath = "c.vcf.gz"
+`)
+	if _, err := cfg.LoadSnapshot("r"); err != nil {
+		t.Fatalf("matching assembly should load: %v", err)
+	}
+}
+
+func TestSourceChecksumSpecValidation(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CGTAG_HOME", "")
+	path := writeConfig(t, dir, "assembly = \"GRCh38\"\ndefault_snapshot = \"r\"\n[database]\nbackend = \"sqlite\"\n")
+	writeSnapshot(t, dir, "r", "01_x.toml", `
+[[sources]]
+name = "x"
+version = "1"
+format = "vcf"
+localpath = "x.vcf.gz"
+checksum = "sha256:nothex"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.LoadSnapshot("r"); err == nil {
+		t.Fatal("expected a checksum-spec validation error")
+	}
+}
+
+func TestRegistryLocations(t *testing.T) {
+	c := &Config{}
+	if got := c.RegistryLocations(); len(got) != 1 || got[0] != DefaultRegistry {
+		t.Errorf("default = %v, want [%s]", got, DefaultRegistry)
+	}
+	c = &Config{RegistryURL: "https://x/registry.toml"}
+	if got := c.RegistryLocations(); len(got) != 1 || got[0] != "https://x/registry.toml" {
+		t.Errorf("registry_url = %v", got)
+	}
+	c = &Config{RegistryURL: "https://x/registry.toml", Registries: []string{"https://a/r.toml", "https://b/r.toml"}}
+	if got := c.RegistryLocations(); len(got) != 2 || got[0] != "https://a/r.toml" {
+		t.Errorf("registries = %v", got)
+	}
+}
+
+func TestBuiltinSource(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CGTAG_HOME", "")
+	path := writeConfig(t, dir, "assembly = \"GRCh38\"\ndefault_snapshot = \"r\"\n[database]\nbackend = \"sqlite\"\n")
+
+	// A builtin source with valid builtins (incl. a parameterized one) loads.
+	writeSnapshot(t, dir, "r", "01_builtins.toml", `
+[[sources]]
+type = "builtin"
+  [[sources.annotations]]
+  builtin = "tstv"
+  [[sources.annotations]]
+  builtin = "auto_id"
+  [[sources.annotations]]
+  builtin = "tags"
+  args = "PANEL:v1"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.LoadSnapshot("r"); err != nil {
+		t.Fatalf("builtin source should load: %v", err)
+	}
+
+	// A parameterized builtin without args errors.
+	writeSnapshot(t, dir, "r", "01_builtins.toml", "[[sources]]\ntype = \"builtin\"\n  [[sources.annotations]]\n  builtin = \"tags\"\n")
+	if _, err := cfg.LoadSnapshot("r"); err == nil {
+		t.Fatal("tags without args should error")
+	}
+
+	// An unknown builtin errors.
+	writeSnapshot(t, dir, "r", "01_builtins.toml", "[[sources]]\ntype = \"builtin\"\n  [[sources.annotations]]\n  builtin = \"nope\"\n")
+	if _, err := cfg.LoadSnapshot("r"); err == nil {
+		t.Fatal("unknown builtin should error")
+	}
+}
+
+func TestGTFSource(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CGTAG_HOME", "")
+	path := writeConfig(t, dir, "assembly = \"GRCh38\"\ndefault_snapshot = \"r\"\n[database]\nbackend = \"sqlite\"\n")
+
+	// A gtf source selecting valid fields (case-insensitive) + gtf_tags loads.
+	writeSnapshot(t, dir, "r", "01_gtf.toml", `
+[[sources]]
+name = "gencode"
+version = "38"
+format = "gtf"
+url = "https://example/gencode.v38.gtf.gz"
+gtf_tags = ["basic"]
+  [[sources.annotations]]
+  name = "gene"
+  field = "GENE"
+  [[sources.annotations]]
+  name = "region"
+  field = "region"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.LoadSnapshot("r"); err != nil {
+		t.Fatalf("gtf source should load: %v", err)
+	}
+
+	// An unrecognized GTF field errors.
+	writeSnapshot(t, dir, "r", "01_gtf.toml", `
+[[sources]]
+name = "gencode"
+version = "38"
+format = "gtf"
+url = "https://example/gencode.v38.gtf.gz"
+  [[sources.annotations]]
+  name = "x"
+  field = "NOPE"
+`)
+	if _, err := cfg.LoadSnapshot("r"); err == nil {
+		t.Fatal("unrecognized GTF field should error")
+	}
+}
+
+func TestGTFSourceRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "01_gencode.toml")
+	in := &Snapshot{Sources: []Source{{
+		Name: "gencode", Version: "38", Format: "gtf", URL: "https://x/g.gtf.gz",
+		GTFTags:     []string{"basic"},
+		Annotations: []Annotation{{Name: "gene", Field: "GENE"}, {Name: "region", Field: "REGION"}},
+	}}}
+	if err := WriteTOML(path, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ReadFragment(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Sources) != 1 || out.Sources[0].Format != "gtf" {
+		t.Fatalf("round-trip sources = %+v", out.Sources)
+	}
+	if got := out.Sources[0].GTFTags; len(got) != 1 || got[0] != "basic" {
+		t.Errorf("round-trip gtf_tags = %v, want [basic]", got)
+	}
+	if len(out.Annotations) != 2 || out.Annotations[0].Source != "gencode" {
+		t.Errorf("round-trip annotations = %+v", out.Annotations)
+	}
+}
+
+// TestConfigOptionalAssemblyAndCache: assembly is snapshot-scoped now (not required
+// globally), and the cache is off unless [database] is set.
+func TestConfigOptionalAssemblyAndCache(t *testing.T) {
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "data_dir = \"d\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("config without assembly/database should load: %v", err)
+	}
+	if cfg.CacheEnabled() {
+		t.Error("cache should be disabled when [database] is absent")
+	}
+	cfg2, err := Load(writeConfig(t, t.TempDir(), "data_dir=\"d\"\n[database]\nbackend=\"sqlite\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg2.CacheEnabled() || cfg2.Database.Path != "cgtag.db" {
+		t.Errorf("cache should be enabled with default path: %+v", cfg2.Database)
+	}
+}
+
+func TestFragmentRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "01_gnomad.toml")
+	in := &Snapshot{Sources: []Source{{
+		Name: "gnomad", Version: "4.1", Format: "vcf", URL: "https://x/g.vcf.gz",
+		Annotations: []Annotation{{Name: "af", Type: "numeric"}},
+	}}}
+	if err := WriteTOML(path, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ReadFragment(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Sources) != 1 || out.Sources[0].ID() != "gnomad:4.1" {
+		t.Errorf("round-trip sources = %+v", out.Sources)
+	}
+	if len(out.Annotations) != 1 || out.Annotations[0].Source != "gnomad" || out.Annotations[0].Name != "af" {
+		t.Errorf("round-trip annotations = %+v", out.Annotations)
+	}
+}
+
+func TestLoadSnapshotParseErrors(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CGTAG_HOME", "")
+	path := writeConfig(t, dir, "assembly = \"GRCh38\"\ndefault_snapshot = \"r\"\n[database]\nbackend = \"sqlite\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// place a raw source body (unparsed) + a manifest referencing it as x:1.
+	place := func(body string) {
+		if err := os.MkdirAll(cfg.SourceDir("x", "1"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cfg.SourceFile("x", "1"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(cfg.SnapshotsPath(), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cfg.SnapshotFile("r"), []byte("sources=[\"x:1\"]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// TOML syntax error → message reports a line position.
+	place("[[sources]]\nname = \"x\nversion = \"1\"\n")
+	if _, err := cfg.LoadSnapshot("r"); err == nil || !strings.Contains(err.Error(), "line") {
+		t.Errorf("syntax error should report a line position, got: %v", err)
+	}
+
+	// Unknown/typo'd key → message names the offending key.
+	place("[[sources]]\nname = \"x\"\nversion = \"1\"\nformat = \"vcf\"\nurl = \"https://x\"\ncheksum = \"md5:abc\"\n")
+	if _, err := cfg.LoadSnapshot("r"); err == nil || !strings.Contains(err.Error(), "cheksum") {
+		t.Errorf("unknown key should be named in the error, got: %v", err)
+	}
+}
+
+func TestSourceBuild(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CGTAG_HOME", "")
+	path := writeConfig(t, dir, "assembly = \"GRCh38\"\ndata_dir = \"data\"\ndefault_snapshot = \"s\"\n[database]\nbackend = \"sqlite\"\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build output resolves to a cache path keyed by name/version.
+	src := Source{Name: "revel", Version: "1.3", Format: "tab",
+		Build: &SourceBuild{Output: "merged.txt.gz", Run: []string{"true"}}}
+	want := filepath.Join(dir, "data", "cache", "revel", "1.3", "merged.txt.gz")
+	if got := cfg.ResolveSourcePath(src); got != want {
+		t.Errorf("build path = %q, want %q", got, want)
+	}
+	if files := cfg.ResolveSourceFiles(src); len(files) != 1 || files[0].Path != want {
+		t.Errorf("ResolveSourceFiles(build) = %+v", files)
+	}
+
+	// A build source with a url (provenance) loads; build+localpath conflicts.
+	writeSnapshot(t, dir, "s", "01.toml",
+		"[[sources]]\nname=\"revel\"\nversion=\"1.3\"\nformat=\"tab\"\nurl=\"https://x\"\n  [sources.build]\n  run=[\"x\"]\n  [[sources.annotations]]\n  name=\"revel\"\n  field=\"7\"\n")
+	if _, err := cfg.LoadSnapshot("s"); err != nil {
+		t.Fatalf("build+url should load: %v", err)
+	}
+	writeSnapshot(t, dir, "s", "01.toml",
+		"[[sources]]\nname=\"revel\"\nversion=\"1.3\"\nformat=\"tab\"\nlocalpath=\"/x\"\n  [sources.build]\n  run=[\"x\"]\n  [[sources.annotations]]\n  name=\"revel\"\n  field=\"7\"\n")
+	if _, err := cfg.LoadSnapshot("s"); err == nil {
+		t.Fatal("build + localpath should conflict")
+	}
+}

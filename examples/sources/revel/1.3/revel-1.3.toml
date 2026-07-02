@@ -1,0 +1,37 @@
+# A built source: data that needs preprocessing before tabix can use it. cgtag
+# downloads `inputs`, fetches `assets` (URL or a path relative to this file), runs
+# `run` (which must write {output}), then caches + indexes the result. The recipe
+# travels with the source, so it's registry-shareable. Helper scripts named in
+# `assets` are co-located next to this .toml (see convert_csv_to_tab.py).
+# Placeholders: {workdir} {inputs} {output} {threads}.
+#
+# `requires` lists the host executables the recipe needs; `cgtag download` checks
+# them up front and fails fast if any is missing.
+[[sources]]
+name     = "revel"
+version  = "1.3"
+assembly = "GRCh38"
+format   = "tab"
+ref_col  = 3
+alt_col  = 4
+url      = "https://sites.google.com/site/revelgenomics/"   # provenance only
+requires = ["unzip", "python3"]   # bgzip+tabix via `cgtag bgzip` — no external binaries
+
+  [sources.build]
+  output = "merged.revel.hg38.txt.gz"
+  inputs = [
+    "https://rothsj06.dmz.hpc.mssm.edu/revel-v1.3_chrom_21_042749014_048084282.csv.zip",
+    # … one line per segment zip
+  ]
+  assets = ["convert_csv_to_tab.py"]   # co-located next to this file
+  run = [
+    "for z in {inputs}/*.zip; do unzip -o $z -d {workdir}; done",
+    # `cgtag bgzip -o … <tabix cols>` writes {output} AND {output}.tbi in one step:
+    "python3 {workdir}/convert_csv_to_tab.py {workdir}/segments/*.csv | cgtag bgzip -o {output} -s 1 -b 2 -e 2 -S 1",
+  ]
+
+  [[sources.annotations]]
+  name        = "revel"
+  field       = "7"
+  type        = "numeric"
+  description = "REVEL missense pathogenicity score"
