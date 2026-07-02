@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/compgenlab/cgtag/internal/model"
+	"github.com/compgenlab/vant/internal/model"
 )
 
 func newTestStore(t *testing.T) *Store {

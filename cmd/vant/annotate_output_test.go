@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/compgenlab/cgtag/internal/config"
-	"github.com/compgenlab/cgtag/internal/engine"
-	"github.com/compgenlab/cgtag/internal/model"
+	"github.com/compgenlab/vant/internal/config"
+	"github.com/compgenlab/vant/internal/engine"
+	"github.com/compgenlab/vant/internal/model"
 )
 
 // annotateResultFixture: one locus with a categorical + a numeric annotation.

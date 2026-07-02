@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/compgenlab/cgtag/internal/model"
+	"github.com/compgenlab/vant/internal/model"
 )
 
 type fakeSource struct {

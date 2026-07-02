@@ -1,4 +1,4 @@
-module github.com/compgenlab/cgtag
+module github.com/compgenlab/vant
 
 go 1.25.0
 

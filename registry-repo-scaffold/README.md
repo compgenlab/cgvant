@@ -1,7 +1,7 @@
-# cgtag-public-data-registry
+# vant-public-data-registry
 
-A catalog of **annotation source/release configs** for [cgtag](https://github.com/compgenlab/cgtag).
-It holds *configurations, not data* — `cgtag download` fetches the actual files.
+A catalog of **annotation source/release configs** for [vant](https://github.com/compgenlab/vant).
+It holds *configurations, not data* — `vant download` fetches the actual files.
 
 ## Layout
 
@@ -11,7 +11,7 @@ sources/<name>/<ver>/<name>-<ver>.toml     one source's config snippet (a source
 releases/<name>.toml                       a full release bundle
 ```
 
-`registry.toml` is served over HTTPS (GitHub raw, Pages, S3 — anywhere). cgtag
+`registry.toml` is served over HTTPS (GitHub raw, Pages, S3 — anywhere). vant
 points at its URL; entry `file` paths resolve relative to it — so the on-disk name is
 free (the layout above is just the convention). Versions are tags: `add-source
 clinvar:2026-01`, or `clinvar` / `clinvar:latest` for the entry marked `latest = true`
@@ -20,15 +20,15 @@ clinvar:2026-01`, or `clinvar` / `clinvar:latest` for the entry marked `latest =
 ## Consuming it
 
 ```sh
-cgtag registry list                                # uses this registry by default
-cgtag release add <release-name>                   # create a local release first
-cgtag registry add-source <release-name> clinvar   # merge a source's config into it
-cgtag registry pull-release <release-name>         # or pull a whole release
+vant registry list                                # uses this registry by default
+vant release add <release-name>                   # create a local release first
+vant registry add-source <release-name> clinvar   # merge a source's config into it
+vant registry pull-release <release-name>         # or pull a whole release
 ```
 
 ## Contributing a source or tool
 
-Run `cgtag registry submit <release-name> <name>` (needs a `public_repo`
+Run `vant registry submit <release-name> <name>` (needs a `public_repo`
 `GITHUB_TOKEN`), or open an issue with the **`source-submission`** label and the
 config in a ` ```toml ` block. Submissions are always `[[sources]]` fragments — a tool is
 just a `type = "tool"` source. A submitted data source **must declare a `checksum`**

@@ -14,8 +14,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"github.com/compgenlab/cgtag/internal/config"
-	"github.com/compgenlab/cgtag/internal/registry"
+	"github.com/compgenlab/vant/internal/config"
+	"github.com/compgenlab/vant/internal/registry"
 )
 
 // cmdRegistry handles `registry list|pull-snapshot|add-source|add-tool|submit`.
@@ -227,7 +227,7 @@ func cmdRegistrySubmit(ctx context.Context, cfg *config.Config, args []string) e
 		assets = localAssets(src.Build.Assets)
 	}
 
-	issueBody := fmt.Sprintf("Proposed source for the cgtag registry (via `cgtag registry submit`).\n\n```toml\n%s```\n", body)
+	issueBody := fmt.Sprintf("Proposed source for the vant registry (via `vant registry submit`).\n\n```toml\n%s```\n", body)
 	if len(assets) > 0 {
 		b64, err := bundleAssets(fragDir, assets)
 		if err != nil {

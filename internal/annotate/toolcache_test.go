@@ -3,7 +3,7 @@ package annotate
 import (
 	"testing"
 
-	"github.com/compgenlab/cgtag/internal/model"
+	"github.com/compgenlab/vant/internal/model"
 )
 
 // TestExpandVariantTemplate covers the input_format per-variant template expansion.

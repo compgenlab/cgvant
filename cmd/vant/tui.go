@@ -13,7 +13,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/compgenlab/cgtag/internal/config"
+	"github.com/compgenlab/vant/internal/config"
 )
 
 // cmdEdit launches the interactive snapshot editor (BubbleTea TUI): a master-detail
@@ -861,7 +861,7 @@ func (m *editModel) View() string {
 
 // breadcrumb renders the accent header path (nil-safe per screen).
 func (m *editModel) breadcrumb() string {
-	parts := []string{"cgtag"}
+	parts := []string{"vant"}
 	switch m.screen {
 	case scrSnapshots:
 		parts = append(parts, "snapshots")

@@ -1,10 +1,10 @@
-# cgtag build management.
+# vant build management.
 #
 # Pure-Go (modernc.org/sqlite + hts) ⇒ CGO_ENABLED=0 cross-compiles cleanly.
 # GOWORK=off is required: the parent go.work references modules that don't exist.
 
-BIN     := cgtag
-PKG     := ./cmd/cgtag
+BIN     := vant
+PKG     := ./cmd/vant
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 GO      := GOWORK=off CGO_ENABLED=0 go
@@ -36,7 +36,7 @@ fmt:
 tidy:
 	GOWORK=off go mod tidy
 
-## install: install cgtag into GOBIN
+## install: install vant into GOBIN
 install:
 	$(GO) install -ldflags '$(LDFLAGS)' $(PKG)
 

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/compgenlab/cgtag/internal/config"
+	"github.com/compgenlab/vant/internal/config"
 )
 
 // TestSourceReproducible: a registry source must be reconstructable without local

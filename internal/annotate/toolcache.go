@@ -13,11 +13,11 @@ import (
 
 	"github.com/compgenlab/hts/htsio/tabix"
 
-	"github.com/compgenlab/cgtag/internal/config"
-	"github.com/compgenlab/cgtag/internal/model"
-	"github.com/compgenlab/cgtag/internal/store"
-	"github.com/compgenlab/cgtag/internal/tool"
-	ivcf "github.com/compgenlab/cgtag/internal/vcf"
+	"github.com/compgenlab/vant/internal/config"
+	"github.com/compgenlab/vant/internal/model"
+	"github.com/compgenlab/vant/internal/store"
+	"github.com/compgenlab/vant/internal/tool"
+	ivcf "github.com/compgenlab/vant/internal/vcf"
 )
 
 // runToolCached runs tool t over inPath, but uses st as a per-locus output cache:

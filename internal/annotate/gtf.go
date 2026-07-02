@@ -8,7 +8,7 @@ import (
 	"github.com/compgenlab/hts/gtf"
 	"github.com/compgenlab/hts/vcf"
 
-	"github.com/compgenlab/cgtag/internal/config"
+	"github.com/compgenlab/vant/internal/config"
 )
 
 // gtfField selects one GTF-derived value (key, one of config.GTFFields) and the

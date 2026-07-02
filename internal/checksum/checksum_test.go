@@ -30,8 +30,8 @@ func TestValidateSpec(t *testing.T) {
 }
 
 func TestVerifierStreaming(t *testing.T) {
-	const data = "hello cgtag"
-	// sha256("hello cgtag")
+	const data = "hello vant"
+	// sha256("hello vant")
 	good := "sha256:" + sha256Hex(data)
 
 	v, err := New(good)
