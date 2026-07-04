@@ -1,8 +1,9 @@
 # Built-in annotators — cgvant's self-contained "built-in tool calls" (hts, no data
 # file). One source of `type = "builtin"` holds them; each annotation names its
-# builtin. Applied only in the `annotate -o` (VCF -> annotated VCF) path.
-#   variant-only   (from chrom/pos/ref/alt; work on any VCF):
-#                  auto_id, indel, tstv (CG_TSTV), vardist (CG_VARDIST), tags.
+# builtin and the output `name` its value appears under.
+#   variant-only   (from chrom/pos/ref/alt; run on any path, incl. bare loci):
+#                  auto_id, indel, tstv (CG_TSTV), tags. (vardist needs the
+#                  neighboring variants in a stream, so it is `-o` VCF only.)
 #   sample-derived (read the input VCF's per-sample FORMAT, so they need samples):
 #                  dosage (CG_DS, GT), vaf (CG_VAF, SAC), minor_strand (CG_SBPCT),
 #                  fisher_sb (CG_FSB), copy_logratio (CG_CNLR, AD).
@@ -13,10 +14,14 @@ version = "1"
 type    = "builtin"
   [[sources.annotations]]
   builtin = "auto_id"
+  name    = "auto_id"
   [[sources.annotations]]
   builtin = "indel"
+  name    = "indel"
   [[sources.annotations]]
   builtin = "tstv"
+  name    = "tstv"
   [[sources.annotations]]
   builtin = "tags"
-  args = "PANEL:v1"
+  name    = "PANEL"
+  args    = "PANEL:v1"

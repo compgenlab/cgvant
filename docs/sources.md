@@ -7,7 +7,7 @@ Everything cgvant annotates from is a **source**, identified `name:version` and 
 | `type` | what it is | data on disk? | runs when? |
 | --- | --- | --- | --- |
 | `""` (default) | a **data file** in `vcf` / `tab` / `bed` / `gtf` format | yes (downloaded/built) | queried by coordinate |
-| `builtin` | a **built-in annotator** computed from the record | no | in the VCF pipeline |
+| `builtin` | a **built-in annotator** computed from the record | no | variant-only on any path; the rest `-o` VCF only |
 | `tool` | an **external annotator** (VEP/ANNOVAR) run per query | no (generates output) | at `annotate` time |
 
 The litmus test between a data source and a tool source: *does producing the annotation
@@ -109,7 +109,7 @@ see **[lifecycle](lifecycle.md#build-sources)**.
 
 A builtin is a self-contained "built-in tool call" — an annotator computed directly from
 the record, with no data file. Builtins live in one `type = "builtin"` source whose nested
-annotations name the builtin:
+annotations name the builtin and give the value an output `name`:
 
 ```toml
 [[sources]]
@@ -118,14 +118,19 @@ version = "1"
 type = "builtin"
   [[sources.annotations]]
   builtin = "tstv"
+  name    = "tstv"          # the name its value appears under (column / JSON key)
   [[sources.annotations]]
   builtin = "tags"
-  args = "PANEL:v1"          # parameterized builtins carry their argument in `args`
+  name    = "PANEL"
+  args    = "PANEL:v1"      # parameterized builtins carry their argument in `args`
 ```
 
-Builtins emit `CG_*` INFO tags. They are **only applied in the VCF pipeline** — i.e.
-`cgvant annotate --format vcf` (or `-o out.vcf`). The engine/overlay path used by
-`--format tab|json|text` does not run builtins.
+In the VCF pipeline (`cgvant annotate --format vcf`, or `-o out.vcf`) builtins emit their
+`CG_*` INFO tags. The *variant-only* builtins (`auto_id`, `indel`, `tstv`, `tags`) also run
+on the engine/overlay path used by `--format tab|json|text` — they compute from
+chrom/pos/ref/alt alone, so they need no VCF or samples. There each contributes a column /
+JSON key under its `name` (a value, or blank/`null` where it doesn't apply — e.g. `tstv`
+on an indel). `vardist` and the sample-derived builtins are `-o` VCF only (see below).
 
 | builtin | tag | needs samples? | notes |
 | --- | --- | --- | --- |
@@ -140,9 +145,10 @@ Builtins emit `CG_*` INFO tags. They are **only applied in the VCF pipeline** �
 | `fisher_sb` | `CG_FSB` | yes | Fisher strand bias |
 | `copy_logratio` | `CG_CNLR` | yes (AD) | copy-number log-ratio; `args = "SOMATIC:GERMLINE[:st:gt]"` |
 
-*Variant-only* builtins work on any VCF; *sample-derived* ones read per-sample `FORMAT`
-(GT/SAC/AD) and need a VCF with samples (so they are meaningful only with a VCF input, not
-bare loci).
+*Variant-only* builtins (`auto_id`/`indel`/`tstv`/`tags`) compute from chrom/pos/ref/alt
+alone, so they run on any path — VCF *or* bare loci (`tab`/`json`/`text`). `vardist` needs
+the neighboring variants in a stream (look-ahead), and the *sample-derived* ones read
+per-sample `FORMAT` (GT/SAC/AD) and need a VCF with samples — so those are `-o` VCF only.
 
 ---
 

@@ -214,8 +214,15 @@ func buildEngineWith(ctx context.Context, cfg *config.Config, snap *config.Snaps
 func newEngineOverStore(ctx context.Context, cfg *config.Config, snap *config.Snapshot, st store.Store, extra []config.Source) (*engine.Engine, error) {
 	var srcs []annotator.SourceAnnotator
 	for _, s := range snap.Sources {
-		if s.IsBuiltinSource() || s.IsTool() {
+		if s.IsTool() {
 			continue // tool sources have no static file; their output arrives via `extra`
+		}
+		if s.IsBuiltinSource() {
+			// The variant-only builtins (auto_id/indel/tstv/tags) compute from the
+			// locus alone, so they run on this path too; sample-derived builtins and
+			// vardist are skipped (NewBuiltinSource filters them).
+			srcs = append(srcs, overlay.NewBuiltinSource(s))
+			continue
 		}
 		srcs = append(srcs, overlay.NewSource(s, cfg.ResolveSourceFiles(s), snap.Annotations))
 	}
@@ -440,9 +447,11 @@ func annotateInputVCF(rest []string) (string, func(), error) {
 // #-commented header + chrom/pos/ref/alt then a column per selected annotation),
 // json (per-variant objects), or text (a human report).
 func formatResults(w io.Writer, format string, loci []model.Locus, selected []config.Annotation, res engine.AnnotateResult) error {
-	names := make([]string, len(selected))
-	for i, a := range selected {
-		names[i] = a.Name
+	names := make([]string, 0, len(selected))
+	for _, a := range selected {
+		if a.Name != "" { // skip any unnamed annotation (no column to render)
+			names = append(names, a.Name)
+		}
 	}
 	valOf := func(l model.Locus, name string) (model.AnnRow, bool) {
 		for _, r := range res.ByLocus[l.Key()] {
@@ -480,6 +489,8 @@ func formatResults(w io.Writer, format string, loci []model.Locus, selected []co
 		out := make([]variant, 0, len(loci))
 		for _, l := range loci {
 			v := variant{Chrom: l.Chrom, Pos: l.Pos, Ref: l.Ref, Alt: l.Alt, Annotations: map[string]any{}}
+			// Schema-stable: every selected annotation is a key, null when absent —
+			// so the JSON object shape matches the TSV columns across all variants.
 			for _, n := range names {
 				if r, ok := valOf(l, n); ok {
 					if r.Value.IsNum {
@@ -487,6 +498,8 @@ func formatResults(w io.Writer, format string, loci []model.Locus, selected []co
 					} else {
 						v.Annotations[n] = r.Value.Str
 					}
+				} else {
+					v.Annotations[n] = nil
 				}
 			}
 			out = append(out, v)

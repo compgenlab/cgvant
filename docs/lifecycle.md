@@ -8,7 +8,7 @@ There are two moments in a source's life: **acquisition** (`cgvant download`, on
 | --- | --- | --- |
 | data (plain) | download file(s), ensure a tabix index | tabix lookup by coordinate |
 | data (build recipe) | run the recipe once → cache + index the output | tabix lookup by coordinate |
-| builtin | nothing to download | computed from the record (pipeline path) |
+| builtin | nothing to download | computed from the record (variant-only run on any path; the rest `-o` VCF only) |
 | tool | acquire the container image + run one-time `setup` | run `steps` per novel locus (cached) |
 
 `cgvant download` handles all of these in one pass over the snapshot's sources

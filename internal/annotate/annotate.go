@@ -403,6 +403,28 @@ func setTabColumn(o *htsann.TabixOptions, field string) {
 // builtinAnnotator builds the hts annotator for a builtin-sourced annotation
 // (except vardist, a stream wrapper handled in BuildPipeline). Parameterized
 // builtins read a.Args.
+// VariantOnlyBuiltin reports whether a builtin computes from chrom/pos/ref/alt
+// alone, so it can run on the cache/locus path (not just the `-o` VCF pipeline).
+// The rest can't: dosage/vaf/minor_strand/fisher_sb/copy_logratio read per-sample
+// FORMAT fields, and vardist needs the neighboring variants in the stream.
+func VariantOnlyBuiltin(name string) bool {
+	switch name {
+	case "auto_id", "indel", "tstv", "tags":
+		return true
+	}
+	return false
+}
+
+// BuiltinAnnotator builds the hts annotator for a builtin annotation, keyed by
+// its builtin name. Exported for the cache/locus overlay path (the streaming
+// pipeline reaches the same annotators via BuildPipeline).
+func BuiltinAnnotator(a config.Annotation) (htsann.Annotator, error) {
+	if a.Source == "" {
+		a.Source = a.Builtin
+	}
+	return builtinAnnotator(a)
+}
+
 func builtinAnnotator(a config.Annotation) (htsann.Annotator, error) {
 	switch a.Source {
 	case "auto_id":

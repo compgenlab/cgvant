@@ -25,11 +25,12 @@ Two internal paths back this:
 
 - **Locus / cache path** (`--format tab|json|text`) — results come from the engine and are
   memoized in the cache. This path is **sample-blind**: it reads only chrom/pos/ref/alt, so
-  builtins that need sample `FORMAT` fields don't apply here.
+  the *variant-only* builtins (`auto_id`/`indel`/`tstv`/`tags`) run here, but builtins that
+  need sample `FORMAT` fields (or, like `vardist`, the neighboring variants) do not.
 - **Pipeline path** (`--format vcf`) — the input streams record-by-record through the hts
   annotation pipeline, preserving the input's header and samples. This is the path where
-  **builtins** apply (they can read per-sample fields). For bare loci, a sites-only VCF is
-  synthesized first.
+  **all** builtins apply (including the sample-derived ones). For bare loci, a sites-only VCF
+  is synthesized first.
 
 ## Annotate output
 
