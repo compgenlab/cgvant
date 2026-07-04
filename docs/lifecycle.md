@@ -13,7 +13,8 @@ There are two moments in a source's life: **acquisition** (`cgvant download`, on
 
 `cgvant download` handles all of these in one pass over the snapshot's sources
 (`--source <name>` restricts to one; `--force` re-does work; `-j N` fetches N files at
-once). Builtins are skipped.
+once; `--keep-temp` keeps the per-source scratch dirs — the build workdir and tool
+setup workdir — for debugging a recipe/setup pipeline). Builtins are skipped.
 
 ---
 

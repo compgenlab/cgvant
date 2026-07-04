@@ -451,12 +451,14 @@ func cmdDownload(ctx context.Context, cfgPath, snapshot string, args []string) e
 	jobs := fs.Int("jobs", 1, "number of files to download at once")
 	fs.IntVar(jobs, "j", 1, "number of files to download at once (shorthand)")
 	quiet := fs.Bool("quiet", false, "suppress per-step progress logs")
+	keepTemp := fs.Bool("keep-temp", false, "keep per-source scratch dirs (build/tool setup) for debugging")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *quiet {
 		fetch.SetLogWriter(io.Discard)
 	}
+	fetch.SetKeepTemp(*keepTemp)
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		return err

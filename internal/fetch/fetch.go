@@ -44,6 +44,24 @@ func SetLogWriter(w io.Writer) { logWriter = w }
 
 func logf(format string, a ...any) { fmt.Fprintf(logWriter, format+"\n", a...) }
 
+// keepTemp, when set, leaves the per-source scratch directories (build recipe
+// workdir, tool setup workdir) on disk instead of removing them — useful for
+// debugging download/build/setup pipelines. Toggled by `download --keep-temp`.
+var keepTemp bool
+
+// SetKeepTemp controls whether fetch keeps its scratch directories (default false).
+func SetKeepTemp(keep bool) { keepTemp = keep }
+
+// cleanupTemp removes a scratch dir unless keepTemp is set, in which case it logs
+// the retained path.
+func cleanupTemp(dir, label string) {
+	if keepTemp {
+		logf("%s: kept temp dir %s", label, dir)
+		return
+	}
+	os.RemoveAll(dir)
+}
+
 // algoOf returns the checksum algorithm of a "<algo>:..." spec ("" when absent).
 func algoOf(spec string) string {
 	if spec == "" {
@@ -159,7 +177,7 @@ func buildSource(ctx context.Context, cfg *config.Config, src config.Source, for
 	if err != nil {
 		return Result{}, err
 	}
-	defer os.RemoveAll(work)
+	defer cleanupTemp(work, src.ID())
 	inputs := filepath.Join(work, "inputs")
 	if err := os.MkdirAll(inputs, 0o755); err != nil {
 		return Result{}, err
@@ -328,7 +346,7 @@ func setupToolSource(ctx context.Context, cfg *config.Config, src config.Source,
 			}
 			logf("%s: running setup (one-time)", t.ID())
 			err = tool.Setup(ctx, t, tool.Params{Image: img, Datadir: datadir, Ref: ref, Workdir: wd, AssetDir: cfg.SourceDir(src.Name, src.Version)})
-			os.RemoveAll(wd)
+			cleanupTemp(wd, t.ID()+" setup")
 			if err != nil {
 				return res, err
 			}
