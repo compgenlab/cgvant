@@ -191,6 +191,10 @@ type Source struct {
 	// Chroms lists the chromosomes to expand a {chrom} template over (multi-file
 	// sources, e.g. one file per chromosome). Ignored when url/localpath has no {chrom}.
 	Chroms []string `toml:"chroms,omitempty"`
+	// Alts lists the alternate bases to expand an {alt} template over — for per-alt
+	// bigWig sets (AlphaMissense/CADD/REVEL: a/c/g/t.bw), where each file holds the
+	// score for that substitution. Defaults to a,c,g,t. Ignored without {alt}.
+	Alts []string `toml:"alts,omitempty"`
 	// Files is an explicit list of files all queried + merged for one source (a
 	// union split by something other than chromosome, e.g. coding + indels).
 	Files []FileSpec `toml:"files,omitempty"`
@@ -292,10 +296,28 @@ func (s Source) IsBuiltinSource() bool { return s.Type == "builtin" }
 // fields (see GTFFields) that its annotations select via `field`.
 func (s Source) IsGTFSource() bool { return s.Format == "gtf" }
 
+// IsBBISource reports whether this is a UCSC BBI source (bigWig or bigBed). BBI
+// files are self-indexed, so they are downloaded and queried in place (no tabix).
+func (s Source) IsBBISource() bool { return s.Format == "bigwig" || s.Format == "bigbed" }
+
 // IsMultiFile reports whether the source expands a {chrom} template into one file
 // per chromosome (over Chroms).
 func (s Source) IsMultiFile() bool {
 	return strings.Contains(s.URL, "{chrom}") || strings.Contains(s.LocalPath, "{chrom}")
+}
+
+// IsPerAlt reports whether the source expands an {alt} template into one file per
+// alternate base (over Alts) — a per-alt bigWig set.
+func (s Source) IsPerAlt() bool {
+	return strings.Contains(s.URL, "{alt}") || strings.Contains(s.LocalPath, "{alt}")
+}
+
+// altList is the alternate bases for an {alt} template (defaults to a,c,g,t).
+func (s Source) altList() []string {
+	if len(s.Alts) > 0 {
+		return s.Alts
+	}
+	return []string{"a", "c", "g", "t"}
 }
 
 // FileSpec is one file of an explicit multi-file source (Source.Files). Each file
@@ -314,6 +336,7 @@ type FileSpec struct {
 // on-disk paths and canonical URLs.
 type SourceFile struct {
 	Chrom         string // "" for a single-file source
+	Alt           string // "" unless this is one file of a per-alt {alt} set
 	Path          string // resolved on-disk data path (localpath if set, else cache)
 	IndexPath     string // resolved on-disk index path ("" = alongside Path)
 	Local         bool   // true ⇒ use Path/IndexPath exactly, never download
@@ -331,9 +354,10 @@ func (c *Config) ResolveSourceFiles(s Source) []SourceFile {
 		// A build source resolves to its single produced (cached) file.
 		return []SourceFile{{Path: c.ResolveSourcePath(s)}}
 	}
-	mk := func(sub Source, chrom string) SourceFile {
+	mk := func(sub Source, chrom, alt string) SourceFile {
 		return SourceFile{
 			Chrom:         chrom,
+			Alt:           alt,
 			Path:          c.ResolveSourcePath(sub),
 			IndexPath:     c.resolveLocalIndex(sub),
 			Local:         sub.LocalPath != "",
@@ -343,6 +367,18 @@ func (c *Config) ResolveSourceFiles(s Source) []SourceFile {
 			ChecksumIndex: sub.ChecksumIndex,
 		}
 	}
+	if s.IsPerAlt() {
+		// One file per alternate base ({alt} → a/c/g/t). No index (BBI self-indexed).
+		alts := s.altList()
+		out := make([]SourceFile, 0, len(alts))
+		for _, a := range alts {
+			s2 := s
+			rep := func(v string) string { return strings.ReplaceAll(v, "{alt}", a) }
+			s2.URL, s2.LocalPath = rep(s.URL), rep(s.LocalPath)
+			out = append(out, mk(s2, "", a))
+		}
+		return out
+	}
 	if len(s.Files) > 0 {
 		out := make([]SourceFile, 0, len(s.Files))
 		for _, f := range s.Files {
@@ -351,7 +387,7 @@ func (c *Config) ResolveSourceFiles(s Source) []SourceFile {
 			sub.URL, sub.LocalPath = f.URL, f.LocalPath
 			sub.URLIndex, sub.LocalPathIndex = f.URLIndex, f.LocalPathIndex
 			sub.Checksum, sub.ChecksumIndex = f.Checksum, f.ChecksumIndex
-			out = append(out, mk(sub, ""))
+			out = append(out, mk(sub, "", ""))
 		}
 		return out
 	}
@@ -368,7 +404,7 @@ func (c *Config) ResolveSourceFiles(s Source) []SourceFile {
 			s2.URLIndex, s2.LocalPathIndex = rep(s.URLIndex), rep(s.LocalPathIndex)
 			s2.Checksum, s2.ChecksumIndex = rep(s.Checksum), rep(s.ChecksumIndex)
 		}
-		out = append(out, mk(s2, ch))
+		out = append(out, mk(s2, ch, ""))
 	}
 	return out
 }
@@ -969,9 +1005,9 @@ func (snap *Snapshot) validate() error {
 			continue
 		}
 		switch s.Format {
-		case "", "vcf", "bed", "tab", "gtf":
+		case "", "vcf", "bed", "tab", "gtf", "bigwig", "bigbed":
 		default:
-			return fmt.Errorf("source %q: unsupported format %q (want vcf|bed|tab|gtf)", s.ID(), s.Format)
+			return fmt.Errorf("source %q: unsupported format %q (want vcf|bed|tab|gtf|bigwig|bigbed)", s.ID(), s.Format)
 		}
 		if s.Build != nil {
 			// `url` is allowed alongside build as a provenance reference; localpath/
@@ -993,6 +1029,14 @@ func (snap *Snapshot) validate() error {
 		}
 		if s.IsMultiFile() && len(s.Chroms) == 0 {
 			return fmt.Errorf("source %q uses {chrom} but has no chroms list", s.ID())
+		}
+		if s.IsPerAlt() {
+			if !s.IsBBISource() {
+				return fmt.Errorf("source %q: {alt} templating is only for bigwig/bigbed sources", s.ID())
+			}
+			if s.IsMultiFile() || len(s.Files) > 0 {
+				return fmt.Errorf("source %q: use an {alt} template, `files`, or a {chrom} template — not a combination", s.ID())
+			}
 		}
 		if len(s.Files) > 0 && (s.URL != "" || s.LocalPath != "" || s.IsMultiFile()) {
 			return fmt.Errorf("source %q: use `files`, a `url`/`localpath`, or a {chrom} template — not a combination", s.ID())

@@ -7,6 +7,7 @@ import (
 
 	"github.com/compgenlab/hts/htsio/tabix"
 
+	"github.com/compgenlab/cgvant/internal/bbitest"
 	"github.com/compgenlab/cgvant/internal/config"
 	"github.com/compgenlab/cgvant/internal/model"
 )
@@ -336,5 +337,89 @@ func TestOverlayAutoConvertChromNaming(t *testing.T) {
 	}
 	if got := rowsByKey(rows)["clinvar_sig"].Str; got != "Pathogenic" {
 		t.Errorf("Ensembl locus 1:100 against UCSC source chr1: clinvar_sig = %q, want Pathogenic", got)
+	}
+}
+
+// TestOverlayBigWig: a single bigWig source yields the base value at the position.
+func TestOverlayBigWig(t *testing.T) {
+	dir := t.TempDir()
+	bw := filepath.Join(dir, "cons.bw")
+	if err := bbitest.WriteBigWig(bw, "chr1", []bbitest.WigItem{
+		{Start: 99, End: 100, Val: 0.42},
+		{Start: 199, End: 200, Val: 9.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	src := config.Source{Name: "cons", Version: "1", Format: "bigwig", LocalPath: bw}
+	anns := []config.Annotation{{Name: "cons_score", Source: "cons", Type: "numeric"}}
+	s := NewSource(src, []config.SourceFile{{Path: bw}}, anns)
+	ctx := context.Background()
+
+	rows, err := s.Annotate(ctx, []model.Locus{{Chrom: "chr1", Pos: 100, Ref: "A", Alt: "G"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rowsByKey(rows)["cons_score"].Num; got != 0.42 {
+		t.Errorf("cons_score = %v, want 0.42", got)
+	}
+	if rows, _ = s.Annotate(ctx, []model.Locus{{Chrom: "chr1", Pos: 150, Ref: "A", Alt: "G"}}); len(rows) != 0 {
+		t.Errorf("gap should yield no value, got %d rows", len(rows))
+	}
+}
+
+// TestOverlayBigBed: a single bigBed source yields a column from the overlap.
+func TestOverlayBigBed(t *testing.T) {
+	dir := t.TempDir()
+	bb := filepath.Join(dir, "clinvar.bb")
+	if err := bbitest.WriteBigBed(bb, "chr1", []bbitest.BedItem{{Start: 100, End: 200, Rest: "Pathogenic\t5"}}); err != nil {
+		t.Fatal(err)
+	}
+	src := config.Source{Name: "clinvar", Version: "1", Format: "bigbed", LocalPath: bb}
+	anns := []config.Annotation{{Name: "sig", Source: "clinvar", Field: "name", Type: "categorical"}}
+	s := NewSource(src, []config.SourceFile{{Path: bb}}, anns)
+
+	rows, err := s.Annotate(context.Background(), []model.Locus{{Chrom: "chr1", Pos: 150, Ref: "A", Alt: "G"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rowsByKey(rows)["sig"].Str; got != "Pathogenic" {
+		t.Errorf("sig = %q, want Pathogenic", got)
+	}
+}
+
+// TestOverlayPerAltBigWig: a per-alt bigWig set ({alt} → a/c/g/t) routes each
+// variant to the file for its alt base (the allele-specific score).
+func TestOverlayPerAltBigWig(t *testing.T) {
+	dir := t.TempDir()
+	vals := map[string]float32{"a": 0.1, "c": 0.2, "g": 0.3, "t": 0.4}
+	var files []config.SourceFile
+	for _, alt := range []string{"a", "c", "g", "t"} {
+		p := filepath.Join(dir, alt+".bw")
+		if err := bbitest.WriteBigWig(p, "chr1", []bbitest.WigItem{{Start: 149, End: 150, Val: vals[alt]}}); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, config.SourceFile{Path: p, Alt: alt})
+	}
+	src := config.Source{Name: "am", Version: "1", Format: "bigwig", LocalPath: filepath.Join(dir, "{alt}.bw")}
+	anns := []config.Annotation{{Name: "am_score", Source: "am", Type: "numeric"}}
+	s := NewSource(src, files, anns)
+	ctx := context.Background()
+
+	// alt G → g.bw = 0.3
+	rows, err := s.Annotate(ctx, []model.Locus{{Chrom: "chr1", Pos: 150, Ref: "A", Alt: "G"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rowsByKey(rows)["am_score"].Num; got != 0.3 {
+		t.Errorf("alt G am_score = %v, want 0.3", got)
+	}
+	// alt T → t.bw = 0.4
+	rows, _ = s.Annotate(ctx, []model.Locus{{Chrom: "chr1", Pos: 150, Ref: "A", Alt: "T"}})
+	if got := rowsByKey(rows)["am_score"].Num; got != 0.4 {
+		t.Errorf("alt T am_score = %v, want 0.4", got)
+	}
+	// an indel alt (multi-base) matches no per-alt file → no value
+	if rows, _ = s.Annotate(ctx, []model.Locus{{Chrom: "chr1", Pos: 150, Ref: "A", Alt: "AT"}}); len(rows) != 0 {
+		t.Errorf("indel should get no per-alt value, got %d rows", len(rows))
 	}
 }

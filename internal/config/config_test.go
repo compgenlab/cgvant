@@ -768,3 +768,49 @@ func TestSourceBuild(t *testing.T) {
 		t.Fatal("build + localpath should conflict")
 	}
 }
+
+// TestPerAltResolveSourceFiles: an {alt} bigwig source expands to one file per
+// alt base, each SourceFile carrying its Alt.
+func TestPerAltResolveSourceFiles(t *testing.T) {
+	cfg := &Config{DataDir: t.TempDir()}
+	src := Source{
+		Name: "am", Version: "1", Format: "bigwig",
+		URL: "https://x/alphaMissense/{alt}.bw",
+	}
+	if !src.IsPerAlt() || !src.IsBBISource() {
+		t.Fatalf("predicates: perAlt=%v bbi=%v", src.IsPerAlt(), src.IsBBISource())
+	}
+	files := cfg.ResolveSourceFiles(src)
+	if len(files) != 4 {
+		t.Fatalf("got %d files, want 4 (a,c,g,t)", len(files))
+	}
+	got := map[string]bool{}
+	for _, f := range files {
+		got[f.Alt] = true
+		if f.IndexPath != "" {
+			t.Errorf("BBI file should have no index path: %+v", f)
+		}
+	}
+	for _, a := range []string{"a", "c", "g", "t"} {
+		if !got[a] {
+			t.Errorf("missing alt %q in %+v", a, files)
+		}
+	}
+}
+
+// TestPerAltValidation: {alt} is bigwig/bigbed-only and can't combine with chroms.
+func TestPerAltValidation(t *testing.T) {
+	bad := &Snapshot{Sources: []Source{{
+		Name: "x", Version: "1", Format: "vcf", URL: "https://x/{alt}.vcf.gz",
+	}}}
+	if err := bad.validate(); err == nil {
+		t.Error("expected error: {alt} on a non-bigwig/bigbed source")
+	}
+	ok := &Snapshot{Sources: []Source{{
+		Name: "am", Version: "1", Format: "bigwig", URL: "https://x/{alt}.bw",
+		Annotations: []Annotation{{Name: "am", Type: "numeric"}},
+	}}}
+	if err := ok.validate(); err != nil {
+		t.Errorf("valid per-alt bigwig should pass: %v", err)
+	}
+}

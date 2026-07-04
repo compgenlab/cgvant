@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/compgenlab/cgvant/internal/bbitest"
 	"github.com/compgenlab/hts/htsio/tabix"
 
 	"github.com/compgenlab/cgvant/internal/config"
@@ -58,7 +59,7 @@ func TestSourceReusePublishedIndexAndBuild(t *testing.T) {
 
 	r1, err := Source(ctx, cfg, config.Source{
 		Name: "clinvar", Version: "1", Format: "vcf",
-		URL: ts.URL + "/clinvar.vcf.gz",
+		URL:      ts.URL + "/clinvar.vcf.gz",
 		Checksum: sha256Spec(t, filepath.Join(srvDir, "clinvar.vcf.gz")),
 	}, false)
 	if err != nil {
@@ -70,7 +71,7 @@ func TestSourceReusePublishedIndexAndBuild(t *testing.T) {
 
 	r2, err := Source(ctx, cfg, config.Source{
 		Name: "gnomad", Version: "1", Format: "vcf",
-		URL: ts.URL + "/gnomad.vcf.gz",
+		URL:      ts.URL + "/gnomad.vcf.gz",
 		Checksum: sha256Spec(t, filepath.Join(srvDir, "gnomad.vcf.gz")),
 	}, false)
 	if err != nil {
@@ -314,9 +315,9 @@ func TestBuildSource(t *testing.T) {
 		Inputs: []string{ts.URL + "/seg.csv"},
 		Assets: []string{"helper.sh"},
 		Run: []string{
-			"test -f {workdir}/helper.sh",  // asset present
-			"test -f {inputs}/seg.csv",     // input downloaded
-			"cp " + pre + " {output}",      // produce the data file
+			"test -f {workdir}/helper.sh",     // asset present
+			"test -f {inputs}/seg.csv",        // input downloaded
+			"cp " + pre + " {output}",         // produce the data file
 			"cp " + pre + ".tbi {output}.tbi", // ship our index
 		},
 	}}
@@ -404,5 +405,31 @@ func TestSnapshotBuildSource(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].Data != "built" {
 		t.Fatalf("results = %+v, want one 'built'", results)
+	}
+}
+
+// TestSourceBigWigNoIndex: a bigWig is downloaded and used as-is — self-indexed,
+// so no tabix index is built or expected (mirrors TestSourceGTFNoIndex).
+func TestSourceBigWigNoIndex(t *testing.T) {
+	srvDir := t.TempDir()
+	bw := filepath.Join(srvDir, "scores.bw")
+	if err := bbitest.WriteBigWig(bw, "chr1", []bbitest.WigItem{{Start: 99, End: 100, Val: 1.5}}); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(http.FileServer(http.Dir(srvDir)))
+	defer ts.Close()
+
+	cfg := &config.Config{DataDir: t.TempDir()}
+	src := config.Source{Name: "revel", Version: "1.3", Format: "bigwig", URL: ts.URL + "/scores.bw"}
+
+	r, err := Source(context.Background(), cfg, src, false)
+	if err != nil {
+		t.Fatalf("bigwig source download: %v", err)
+	}
+	if r.Data != "downloaded" || r.Index != "none" {
+		t.Errorf("bigwig: got data=%s index=%s, want downloaded/none", r.Data, r.Index)
+	}
+	if m := Missing(cfg, src); m != nil {
+		t.Errorf("bigwig source should not be Missing, got %v", m)
 	}
 }

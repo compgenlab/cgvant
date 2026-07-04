@@ -200,6 +200,21 @@ func BuildPipeline(snap *config.Snapshot, resolve func(config.Source) []config.S
 // file's annotator per record — a record whose contig isn't in a given file is a
 // no-op (hts), so the file matching by position+ref/alt provides the value.
 func AnnotatorFor(src config.Source, a config.Annotation, files []config.SourceFile) (htsann.Annotator, error) {
+	if src.IsPerAlt() {
+		// A per-alt file set (bigWig a/c/g/t): route each record to the file matching
+		// its alt base, so the value is allele-specific.
+		d := &altDispatch{anns: map[string]htsann.Annotator{}}
+		for _, f := range files {
+			ann, err := buildSingle(src, a, f.Path)
+			if err != nil {
+				d.Close()
+				return nil, err
+			}
+			d.order = append(d.order, ann)
+			d.anns[strings.ToLower(f.Alt)] = ann
+		}
+		return d, nil
+	}
 	if len(files) == 1 {
 		return buildSingle(src, a, files[0].Path)
 	}
@@ -274,6 +289,43 @@ func (m *multiFile) Close() error {
 	return err
 }
 
+// altDispatch routes a record to the annotator for its alt base (a per-alt bigWig
+// set: a/c/g/t). A record whose alt isn't a single base with a file (e.g. an indel)
+// gets no value. The shared header is declared once (via the first file).
+type altDispatch struct {
+	anns  map[string]htsann.Annotator // lowercased alt base -> annotator
+	order []htsann.Annotator          // stable order for header/close
+}
+
+func (d *altDispatch) SetupHeader(h *vcf.VcfHeader) error {
+	if len(d.order) == 0 {
+		return nil
+	}
+	return d.order[0].SetupHeader(h)
+}
+
+func (d *altDispatch) Annotate(rec *vcf.VcfRecord) error {
+	alts := rec.Alt()
+	if len(alts) == 0 {
+		return nil
+	}
+	ann, ok := d.anns[strings.ToLower(alts[0])]
+	if !ok {
+		return nil // no file for this alt (multi-base/indel) → no value
+	}
+	return ann.Annotate(rec)
+}
+
+func (d *altDispatch) Close() error {
+	var err error
+	for _, ann := range d.order {
+		if e := ann.Close(); e != nil && err == nil {
+			err = e
+		}
+	}
+	return err
+}
+
 // buildSingle maps cgvant's config knobs onto hts annotate options for one file.
 // AutoConvert is on for every annotator: hts builds a contig converter from the
 // source file's own ref names, so input/source chrom naming (Ensembl "1" / UCSC
@@ -304,9 +356,38 @@ func buildSingle(src config.Source, a config.Annotation, path string) (htsann.An
 		}
 		setTabColumn(&opts, a.FieldName())
 		return htsann.NewTabixAnnotator(opts)
+	case "bigwig":
+		// One numeric value per base (no ref/alt); allele specificity, when needed,
+		// comes from a per-alt {alt} file set routed by altDispatch.
+		return htsann.NewBigWigAnnotator(htsann.BigWigOptions{
+			Name: a.Name, Filename: path, AutoConvert: true,
+		})
+	case "bigbed":
+		col, err := bigBedColumn(a.FieldName())
+		if err != nil {
+			return nil, fmt.Errorf("source %q: %w", src.ID(), err)
+		}
+		return htsann.NewBigBedAnnotator(htsann.BigBedOptions{
+			Name: a.Name, Filename: path, Col: col, IsNumber: a.IsNumeric(), AutoConvert: true,
+		})
 	default:
 		return nil, fmt.Errorf("source %q: unsupported format %q", src.ID(), src.Format)
 	}
+}
+
+// bigBedColumn resolves a bigBed annotation field to a 1-based BED column: a
+// number, or "name" (4) / "score" (5). autoSql column names are not yet supported.
+func bigBedColumn(field string) (int, error) {
+	switch strings.ToLower(field) {
+	case "name", "":
+		return 4, nil
+	case "score":
+		return 5, nil
+	}
+	if n, err := strconv.Atoi(field); err == nil {
+		return n, nil
+	}
+	return 0, fmt.Errorf("bigbed field %q: use a 1-based column number, \"name\", or \"score\"", field)
 }
 
 // setTabColumn sets the value column for a tab source (1-based integer or a

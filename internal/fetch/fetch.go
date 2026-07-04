@@ -366,15 +366,15 @@ func Source(ctx context.Context, cfg *config.Config, src config.Source, force bo
 // alongside or pointed at by localpath_index.
 func fetchFile(ctx context.Context, f config.SourceFile, format, label string, force bool) (data, index string, err error) {
 	base := path.Base(f.Path)
-	// A GTF source is read into memory by the annotator; it needs no tabix index
-	// and is not a tabix file, so skip indexing and the tabix-open verification.
-	gtf := format == "gtf"
+	// A GTF source is read into memory; a BBI source (bigwig/bigbed) is self-indexed.
+	// Neither is a tabix file, so skip indexing and the tabix-open verification.
+	selfIndexed := format == "gtf" || format == "bigwig" || format == "bigbed"
 	if f.Local {
 		if !fileExists(f.Path) {
 			return "", "", fmt.Errorf("localpath not found: %s", f.Path)
 		}
 		logf("%s: using local %s", label, f.Path)
-		if gtf {
+		if selfIndexed {
 			return "local", "none", nil
 		}
 		idx, err := ensureLocalIndex(f)
@@ -412,7 +412,7 @@ func fetchFile(ctx context.Context, f config.SourceFile, format, label string, f
 		}
 		data = "downloaded"
 	}
-	if gtf {
+	if selfIndexed {
 		return data, "none", nil
 	}
 	index, err = ensureIndex(ctx, f, target, format, force)
@@ -504,8 +504,8 @@ func Missing(cfg *config.Config, src config.Source) []string {
 			missing = append(missing, f.Path)
 			continue
 		}
-		if src.IsGTFSource() {
-			continue // read in-memory; no index expected
+		if src.IsGTFSource() || src.IsBBISource() {
+			continue // GTF read in-memory / BBI self-indexed; no sidecar index expected
 		}
 		hasIndex := fileExists(f.Path+".tbi") || fileExists(f.Path+".csi") ||
 			(f.IndexPath != "" && fileExists(f.IndexPath))

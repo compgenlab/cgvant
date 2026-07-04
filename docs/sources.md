@@ -71,6 +71,30 @@ One source can span several files, all queried and merged:
   from a fixed vocabulary of derived fields via `field`: `GENE`, `GENEID`, `STRAND`,
   `BIOTYPE`, `REGION`, `CODING`, `NONCODING`. `gtf_tags = [...]` restricts to features
   carrying every listed tag (e.g. `"basic"` for the GENCODE basic set).
+- **`bigwig`** — a UCSC bigWig (`.bw`): one numeric value per base. The annotation is that
+  value at the variant position (`type = "numeric"`; no `field`). BBI files are
+  **self-indexed** — downloaded whole and queried in place, with no tabix step. Only
+  base-resolution data is read (display zoom summaries are ignored), so values are exact.
+- **`bigbed`** — a UCSC bigBed (`.bb`): interval overlap like `bed`. `field = "name"`
+  (col 4), `"score"` (col 5), or a 1-based column number. Also self-indexed.
+
+**Per-alt bigWig sets.** Allele-specific scores (AlphaMissense, CADD, REVEL) are published
+as four bigWigs — one per alternate base (`a/c/g/t.bw`). Declare them with an `{alt}`
+template; cgvant fetches all four and routes each variant to the file for its alt base:
+
+```toml
+[[sources]]
+name    = "alphamissense"
+version = "1"
+format  = "bigwig"
+url     = "https://hgdownload.soe.ucsc.edu/gbdb/hg38/alphaMissense/{alt}.bw"
+# alts  = ["a","c","g","t"]   # the default
+  [[sources.annotations]]
+  name = "am_pathogenicity"
+  type = "numeric"
+```
+
+An indel (multi-base alt) matches no per-alt file and gets no value.
 
 **Chromosome naming is auto-converted:** cgvant builds a converter from the source file's
 own reference names, so input/source naming (Ensembl `1` / UCSC `chr1` / NCBI
