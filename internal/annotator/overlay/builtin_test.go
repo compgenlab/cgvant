@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/compgenlab/cgvant/internal/config"
-	"github.com/compgenlab/cgvant/internal/model"
+	"github.com/compgenlab/cganno/internal/config"
+	"github.com/compgenlab/cganno/internal/model"
 )
 
 // TestBuiltinSource: the variant-only builtins (auto_id/indel/tstv/tags) compute a

@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/compgenlab/cgvant/internal/model"
+	"github.com/compgenlab/cganno/internal/model"
 )
 
 // ReadFile parses loci from a VCF file (plain or gzipped). Multi-allelic ALTs

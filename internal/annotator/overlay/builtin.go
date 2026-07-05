@@ -7,9 +7,9 @@ import (
 
 	"github.com/compgenlab/hts/vcf"
 
-	"github.com/compgenlab/cgvant/internal/annotate"
-	"github.com/compgenlab/cgvant/internal/config"
-	"github.com/compgenlab/cgvant/internal/model"
+	"github.com/compgenlab/cganno/internal/annotate"
+	"github.com/compgenlab/cganno/internal/config"
+	"github.com/compgenlab/cganno/internal/model"
 )
 
 // BuiltinSource is the cache/locus-path annotator for the variant-only builtins

@@ -1,4 +1,4 @@
-module github.com/compgenlab/cgvant
+module github.com/compgenlab/cganno
 
 go 1.25.0
 

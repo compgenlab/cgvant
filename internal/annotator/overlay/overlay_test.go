@@ -7,9 +7,9 @@ import (
 
 	"github.com/compgenlab/hts/htsio/tabix"
 
-	"github.com/compgenlab/cgvant/internal/bbitest"
-	"github.com/compgenlab/cgvant/internal/config"
-	"github.com/compgenlab/cgvant/internal/model"
+	"github.com/compgenlab/cganno/internal/bbitest"
+	"github.com/compgenlab/cganno/internal/config"
+	"github.com/compgenlab/cganno/internal/model"
 )
 
 func writeIndexedVCF(t *testing.T, dir string) string {

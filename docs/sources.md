@@ -1,6 +1,6 @@
 # Source types
 
-Everything cgvant annotates from is a **source**, identified `name:version` and living at
+Everything cganno annotates from is a **source**, identified `name:version` and living at
 `sources/<name>/<version>/<name>-<version>.toml`. A source is discriminated by its
 `type` field:
 
@@ -42,7 +42,7 @@ checksum_index = "md5:…"
 - **`url` vs `localpath`:** `url`/`url_index` are the canonical reference kept for
   provenance and the registry; `localpath`/`localpath_index` are this machine's files —
   when `localpath` is set the file is used exactly and never downloaded. Environment
-  variables (`${VAR}`, `$CGVANT_HOME`) are expanded in `localpath`. `registry submit`
+  variables (`${VAR}`, `$CGANNO_HOME`) are expanded in `localpath`. `registry submit`
   strips `localpath`.
 - **`checksum`/`checksum_index`** are optional (`md5`|`sha1`|`sha256`); verified while
   downloading when present. The value may be a URL to a checksum file.
@@ -80,7 +80,7 @@ One source can span several files, all queried and merged:
 
 **Per-alt bigWig sets.** Allele-specific scores (AlphaMissense, CADD, REVEL) are published
 as four bigWigs — one per alternate base (`a/c/g/t.bw`). Declare them with an `{alt}`
-template; cgvant fetches all four and routes each variant to the file for its alt base:
+template; cganno fetches all four and routes each variant to the file for its alt base:
 
 ```toml
 [[sources]]
@@ -96,7 +96,7 @@ url     = "https://hgdownload.soe.ucsc.edu/gbdb/hg38/alphaMissense/{alt}.bw"
 
 An indel (multi-base alt) matches no per-alt file and gets no value.
 
-**Chromosome naming is auto-converted:** cgvant builds a converter from the source file's
+**Chromosome naming is auto-converted:** cganno builds a converter from the source file's
 own reference names, so input/source naming (Ensembl `1` / UCSC `chr1` / NCBI
 `NC_000001.11`) is matched automatically.
 
@@ -125,7 +125,7 @@ type = "builtin"
   args    = "PANEL:v1"      # parameterized builtins carry their argument in `args`
 ```
 
-In the VCF pipeline (`cgvant annotate --format vcf`, or `-o out.vcf`) builtins emit their
+In the VCF pipeline (`cganno annotate --format vcf`, or `-o out.vcf`) builtins emit their
 `CG_*` INFO tags. The *variant-only* builtins (`auto_id`, `indel`, `tstv`, `tags`) also run
 on the engine/overlay path used by `--format tab|json|text` — they compute from
 chrom/pos/ref/alt alone, so they need no VCF or samples. There each contributes a column /
@@ -155,7 +155,7 @@ per-sample `FORMAT` (GT/SAC/AD) and need a VCF with samples — so those are `-o
 ## Tool sources (`type = "tool"`)
 
 A tool source is an external, often containerized annotator (VEP, ANNOVAR, a custom
-script) that runs **per query**: cgvant hands it the query variants, it produces an output
+script) that runs **per query**: cganno hands it the query variants, it produces an output
 file, and that output is consumed exactly like a data source of its `format`.
 
 ```toml

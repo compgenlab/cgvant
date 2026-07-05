@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/compgenlab/cgvant/internal/config"
+	"github.com/compgenlab/cganno/internal/config"
 )
 
 // annJob is one fan-out unit: an annotation pass over the whole input, run in
@@ -117,12 +117,12 @@ func annotateVCFFanOut(cfg *config.Config, snap *config.Snapshot, inPath, outPat
 		return AnnotateVCF(p, inPath, outPath)
 	}
 
-	tmpDir, err := os.MkdirTemp("", "cgvant-annotate-")
+	tmpDir, err := os.MkdirTemp("", "cganno-annotate-")
 	if err != nil {
 		return err
 	}
 	if keepTemp {
-		fmt.Fprintf(os.Stderr, "cgvant: keeping annotate temp dir %s\n", tmpDir)
+		fmt.Fprintf(os.Stderr, "cganno: keeping annotate temp dir %s\n", tmpDir)
 	} else {
 		defer os.RemoveAll(tmpDir)
 	}

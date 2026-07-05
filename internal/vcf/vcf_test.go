@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/compgenlab/cgvant/internal/model"
+	"github.com/compgenlab/cganno/internal/model"
 )
 
 // TestWriteLoci: WriteLoci emits a sites-only VCF (sorted) that ReadFile parses

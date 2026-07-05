@@ -1,10 +1,10 @@
-# cgvant build management.
+# cganno build management.
 #
 # Pure-Go (modernc.org/sqlite + hts) ⇒ CGO_ENABLED=0 cross-compiles cleanly.
 # GOWORK=off is required: the parent go.work references modules that don't exist.
 
-BIN     := cgvant
-PKG     := ./cmd/cgvant
+BIN     := cganno
+PKG     := ./cmd/cganno
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 GO      := GOWORK=off CGO_ENABLED=0 go
@@ -36,7 +36,7 @@ fmt:
 tidy:
 	GOWORK=off go mod tidy
 
-## install: install cgvant into GOBIN
+## install: install cganno into GOBIN
 install:
 	$(GO) install -ldflags '$(LDFLAGS)' $(PKG)
 

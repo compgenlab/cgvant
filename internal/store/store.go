@@ -7,7 +7,7 @@ package store
 import (
 	"context"
 
-	"github.com/compgenlab/cgvant/internal/model"
+	"github.com/compgenlab/cganno/internal/model"
 )
 
 // Store is the annotation cache: it memoizes computed annotations keyed by locus

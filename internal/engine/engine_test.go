@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/compgenlab/cgvant/internal/model"
-	"github.com/compgenlab/cgvant/internal/store/sqlite"
+	"github.com/compgenlab/cganno/internal/model"
+	"github.com/compgenlab/cganno/internal/store/sqlite"
 )
 
 // countingAnnotator records how many times it is invoked, to prove the

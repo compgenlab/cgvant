@@ -9,9 +9,9 @@ import (
 
 	"github.com/compgenlab/hts/htsio/tabix"
 
-	"github.com/compgenlab/cgvant/internal/config"
-	"github.com/compgenlab/cgvant/internal/model"
-	"github.com/compgenlab/cgvant/internal/store/sqlite"
+	"github.com/compgenlab/cganno/internal/config"
+	"github.com/compgenlab/cganno/internal/model"
+	"github.com/compgenlab/cganno/internal/store/sqlite"
 )
 
 // TestAnnotateVCFWithTool exercises the full external-tool path with a fake tool

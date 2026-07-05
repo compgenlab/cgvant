@@ -9,10 +9,10 @@ import (
 
 	"github.com/compgenlab/hts/htsio/tabix"
 
-	"github.com/compgenlab/cgvant/internal/config"
+	"github.com/compgenlab/cganno/internal/config"
 )
 
-// TestContainerMapping: a container step binds each host dir to a fixed /cgvant/*
+// TestContainerMapping: a container step binds each host dir to a fixed /cganno/*
 // mountpoint and renders the placeholders to those in-container paths (host-
 // independent, so the engine never recreates a deep host path inside the image).
 func TestContainerMapping(t *testing.T) {
@@ -22,26 +22,26 @@ func TestContainerMapping(t *testing.T) {
 	inDir := t.TempDir()
 	p := Params{
 		Datadir: "/home/u/deep/cache/tools/vep/113",
-		Workdir: "/tmp/cgvant-xyz",
+		Workdir: "/tmp/cganno-xyz",
 		Ref:     filepath.Join(refDir, "GRCh38.fa"),
 		Input:   filepath.Join(inDir, "in.vcf"),
-		Output:  "/tmp/cgvant-xyz/vep.vcf.gz",
+		Output:  "/tmp/cganno-xyz/vep.vcf.gz",
 		Image:   "/img/vep.sif",
 	}
 	repl, binds := containerMapping(config.Tool{}, p)
 
 	wantBinds := []string{
-		"-B", "/home/u/deep/cache/tools/vep/113:/cgvant/data",
-		"-B", "/tmp/cgvant-xyz:/cgvant/work",
-		"-B", refDir + ":/cgvant/ref",
-		"-B", inDir + ":/cgvant/in",
+		"-B", "/home/u/deep/cache/tools/vep/113:/cganno/data",
+		"-B", "/tmp/cganno-xyz:/cganno/work",
+		"-B", refDir + ":/cganno/ref",
+		"-B", inDir + ":/cganno/in",
 	}
 	if strings.Join(binds, " ") != strings.Join(wantBinds, " ") {
 		t.Errorf("binds = %v\nwant %v", binds, wantBinds)
 	}
 
 	got := repl.Replace("vep -i {input} -o {output} --dir_cache {datadir} --fasta {ref} --work {workdir}")
-	want := "vep -i /cgvant/in/in.vcf -o /cgvant/work/vep.vcf.gz --dir_cache /cgvant/data --fasta /cgvant/ref/GRCh38.fa --work /cgvant/work"
+	want := "vep -i /cganno/in/in.vcf -o /cganno/work/vep.vcf.gz --dir_cache /cganno/data --fasta /cganno/ref/GRCh38.fa --work /cganno/work"
 	if got != want {
 		t.Errorf("render =\n %q\nwant\n %q", got, want)
 	}
@@ -59,15 +59,15 @@ func TestContainerMappingMissingRef(t *testing.T) {
 	}
 	repl, binds := containerMapping(config.Tool{}, p)
 	for _, b := range binds {
-		if strings.Contains(b, "/cgvant/ref") {
+		if strings.Contains(b, "/cganno/ref") {
 			t.Errorf("missing ref dir should not be bound, got %v", binds)
 		}
 	}
-	if got := repl.Replace("INSTALL.pl -c {datadir}"); got != "INSTALL.pl -c /cgvant/data" {
+	if got := repl.Replace("INSTALL.pl -c {datadir}"); got != "INSTALL.pl -c /cganno/data" {
 		t.Errorf("setup render = %q", got)
 	}
 	// {ref} still maps to the in-container path (a step that uses it fails clearly).
-	if got := repl.Replace("--fasta {ref}"); got != "--fasta /cgvant/ref/GRCh38.fa" {
+	if got := repl.Replace("--fasta {ref}"); got != "--fasta /cganno/ref/GRCh38.fa" {
 		t.Errorf("ref render = %q", got)
 	}
 }
@@ -197,7 +197,7 @@ func TestMissingAssets(t *testing.T) {
 		Assets: []string{"expand_vep_vcf.py"}, // declared
 		Steps: []config.Step{
 			{Run: "vep -i {input} -o {workdir}/vep.vcf --fasta {ref}"}, // produces vep.vcf
-			{Run: "python3 {workdir}/expand_vep_vcf.py < {workdir}/vep.vcf | python3 {workdir}/worst.py | cgvant bgzip > {output}"},
+			{Run: "python3 {workdir}/expand_vep_vcf.py < {workdir}/vep.vcf | python3 {workdir}/worst.py | cganno bgzip > {output}"},
 		},
 	}
 	got := missingAssets(tl, tl.Steps)

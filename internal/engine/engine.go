@@ -6,9 +6,9 @@ package engine
 import (
 	"context"
 
-	"github.com/compgenlab/cgvant/internal/annotator"
-	"github.com/compgenlab/cgvant/internal/model"
-	"github.com/compgenlab/cgvant/internal/store"
+	"github.com/compgenlab/cganno/internal/annotator"
+	"github.com/compgenlab/cganno/internal/model"
+	"github.com/compgenlab/cganno/internal/store"
 )
 
 // Engine is the core service.
