@@ -463,6 +463,9 @@ func cmdDownload(ctx context.Context, cfgPath, snapshot string, args []string) e
 	if err != nil {
 		return err
 	}
+	if err := applyTempDir(cfg.TempDir); err != nil {
+		return err
+	}
 	snap, err := cfg.LoadSnapshot(snapshot)
 	if err != nil {
 		return err

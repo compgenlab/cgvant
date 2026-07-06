@@ -18,6 +18,9 @@
 data_dir         = "$CGANNO_HOME/data"        # base dir for relative `localpath` source files
 cache_dir        = "$CGANNO_HOME/data/cache"  # downloaded sources + tool images/data cached here,
                                              # keyed by name/version (set absolute to share across homes)
+# temp_dir       = "/scratch/cganno-tmp"     # base for scratch dirs (tool workdirs, fan-out parts,
+                                             # synthesized input); default $TMPDIR or /tmp. `annotate
+                                             # --temp-dir DIR` overrides it. Set this if /tmp is small.
 default_snapshot = "2026-06"
 annotations_dir  = "./annotations"           # root for sources/, snapshots/ (default: $CGANNO_HOME/annotations)
 # Config registries for `cganno registry` — each is a static HTTPS registry.toml URL.

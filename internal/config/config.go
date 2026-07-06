@@ -65,6 +65,7 @@ type Config struct {
 	// assembly (see ReferenceFor) rather than being pinned in the manifest.
 	DataDir         string               `toml:"data_dir"`
 	CacheDir        string               `toml:"cache_dir"` // downloaded source files, cached by name/version
+	TempDir         string               `toml:"temp_dir,omitempty"` // base for scratch dirs (tool workdirs, fan-out parts); default: $TMPDIR or /tmp
 	DefaultSnapshot string               `toml:"default_snapshot"`
 	AnnotationsDir  string               `toml:"annotations_dir"`      // root holding sources/ tools/ snapshots/ (default "annotations")
 	RegistryURL     string               `toml:"registry_url"`         // single registry (legacy); HTTPS registry.toml URL or base

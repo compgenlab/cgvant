@@ -25,6 +25,9 @@ func cmdServer(ctx context.Context, cfgPath, snapshot string, args []string) err
 	if err != nil {
 		return err
 	}
+	if err := applyTempDir(cfg.TempDir); err != nil {
+		return err
+	}
 	if *addr != "" {
 		cfg.Server.Endpoint = *addr
 	}

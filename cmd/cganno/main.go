@@ -169,6 +169,7 @@ annotation commands:
   annotate [--all|-a name,...] [--format tab|vcf|json|text] [-o FILE] [-v] <vcf|locus...>
                                annotate loci (default format: tab; -o writes to a file; -v prints progress)
                                vcf output: --tool-cache-dir DIR caches/reuses tool output by input
+                               --temp-dir DIR puts scratch files there (default: config temp_dir, else $TMPDIR)
   server [-addr IP:port]       run the async REST annotate server (needs a [server] config block)
   versions                     show the active snapshot
   version                      print the cganno version
@@ -241,6 +242,7 @@ func cmdAnnotate(ctx context.Context, cfgPath, snapshot string, args []string) e
 	fs.IntVar(threads, "t", 1, "shorthand for --threads")
 	keepTemp := fs.Bool("keep-temp", false, "vcf output: keep the per-source temp part files (for debugging the fan-out)")
 	toolCacheDir := fs.String("tool-cache-dir", "", "vcf output: directory used as a per-input tool-output cache — reuse a saved output matching this input+tool+assembly (skip the tool), else run it and save the output there")
+	tempDir := fs.String("temp-dir", "", "base directory for scratch files (tool workdirs, fan-out parts); default: config temp_dir, else $TMPDIR or /tmp")
 	verbose := fs.Bool("verbose", false, "print progress to stderr (phases, tool cache hits, variant counts)")
 	fs.BoolVar(verbose, "v", false, "shorthand for --verbose")
 	var keys stringList
@@ -265,6 +267,12 @@ func cmdAnnotate(ctx context.Context, cfgPath, snapshot string, args []string) e
 
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
+		return err
+	}
+	// Scratch dirs (tool workdirs, fan-out parts, synthesized input) go under this
+	// base; the --temp-dir flag overrides the config's temp_dir. Applies to any
+	// subprocess too (e.g. VEP inherits TMPDIR).
+	if err := applyTempDir(firstNonEmpty(*tempDir, cfg.TempDir)); err != nil {
 		return err
 	}
 	snap, err := cfg.LoadSnapshot(snapshot)
@@ -482,6 +490,34 @@ func parseLocus(s string) (model.Locus, error) { return vcf.ParseLocus(s) }
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+// applyTempDir points the process's temp base at dir (creating it if needed) by
+// setting TMPDIR, so every os.MkdirTemp("", …) scratch dir — and any subprocess
+// that honors TMPDIR — lands there instead of the default /tmp. An empty dir leaves
+// the default in place.
+func applyTempDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(os.ExpandEnv(dir))
+	if err != nil {
+		abs = os.ExpandEnv(dir)
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		return fmt.Errorf("temp dir %s: %w", abs, err)
+	}
+	return os.Setenv("TMPDIR", abs)
+}
+
+// firstNonEmpty returns the first non-empty string.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // vcfOutName renders a VCF output destination for -v logs (stdout shown as "(stdout)").
