@@ -3,10 +3,11 @@
 **Fast, no-fuss variant annotation from the command line.**
 
 `cganno` annotates VCF files (and bare loci) against a *versioned* bundle of reference
-sources — gene model, ClinVar significance, gnomAD allele frequencies, CADD/REVEL
-scores, your own BED/VCF/TSV tracks, or external tools like VEP — and caches the
-results so repeat work is instant. It's a single static Go binary: no Perl, no
-cache-install dance, no database server to stand up.
+sources — a gene model, ClinVar significance, gnomAD allele frequencies, CADD/REVEL
+scores, your own BED/VCF/TSV tracks, or external tools like VEP — and caches results
+so repeat work is instant. Use it from the command line or run it as an asynchronous
+HTTP service. It's a single static Go binary: no Perl, no cache-install dance, no
+database server to stand up.
 
 > The name: `cg` for [compgenlab](https://github.com/compgenlab) + **variant**
 > annotation. Built-in annotations are emitted as `CG_*` INFO tags.
@@ -17,10 +18,17 @@ cache-install dance, no database server to stand up.
   amd64/arm64. No interpreter or system libraries to manage.
 - **Versioned bundles.** A *snapshot* pins a set of `name:version` sources + their
   annotation schema, so output is reproducible and the config is git-friendly.
-- **Memoizing cache.** Each locus is annotated once and served from SQLite thereafter.
 - **Config-driven.** Sources and the fields they expose are declared in TOML — no code
   to add a new annotation. Sources can be static files, built-in annotators, or
   external tools (VEP/ANNOVAR).
+- **Memoizing cache.** Annotated loci are memoized in SQLite and served instantly
+  thereafter; an external tool's output can be reused across runs (`--tool-cache-dir`)
+  instead of re-running it.
+- **Scales to whole genomes.** Parallel per-source VCF annotation (`-t`), BGZF output,
+  and GTF gene models that are tabix-indexed and queried by position — so multiple large
+  gene models stay memory-bounded rather than loaded whole into RAM.
+- **REST server.** `cganno server` runs the same engine behind an asynchronous HTTP job
+  queue (submit a locus or an uploaded VCF → poll → fetch JSON results).
 
 ## Install
 
@@ -44,9 +52,21 @@ cganno download -j 4
 # annotate (default output is TSV; --format vcf|json|text, -o writes to a file):
 cganno annotate chr1:115256529:T:C
 cganno annotate --all --format vcf -o out.vcf in.vcf
+
+# whole-genome: annotate sources in parallel and write bgzipped VCF (-v for progress):
+cganno annotate --all --format vcf -t 8 -v -o out.vcf.gz in.vcf.gz
 ```
 
-See the **[Quick start guide](docs/quickstart.md)** for a fuller walkthrough.
+Or serve the same engine over HTTP (a valid API token is printed to stdout on startup):
+
+```sh
+cganno server                                   # needs a [server] block in config.toml
+curl -H "Authorization: Bearer $TOKEN" -d '{"locus":"chr1:115256529:T:C"}' \
+     http://127.0.0.1:8080/v1/annotate          # → {"job_id": …}; poll /v1/jobs/{id}/results
+```
+
+See the **[Quick start guide](docs/quickstart.md)** for a fuller walkthrough, and the
+**[REST API](docs/rest-api.md)** page for the server.
 
 ## Documentation
 
