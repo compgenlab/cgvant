@@ -43,3 +43,13 @@ path    = "$CGANNO_HOME/cganno.db"
 fasta = "/data/ref/GRCh38.fa"
 # [references.GRCh37]
 # fasta = "/data/ref/GRCh37.fa"
+
+# OPTIONAL: the async REST annotate server (`cganno server`). Omit this block if
+# you only use the CLI. The API under /v1 is authenticated with HMAC tokens signed
+# by master_key; a valid token is printed to stdout on startup. Jobs + results are
+# stored in `db` (its own SQLite database, separate from the annotation cache).
+# [server]
+# endpoint   = "127.0.0.1:8080"          # IP:port to listen on
+# master_key = "change-me-to-a-secret"   # HMAC key signing /v1 API tokens
+# workers    = 1                          # async annotation worker pool size
+# db         = "$CGANNO_HOME/cganno_server.db"  # job-queue + results DB

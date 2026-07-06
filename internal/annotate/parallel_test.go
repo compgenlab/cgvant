@@ -54,6 +54,38 @@ func parallelSnapshot(t *testing.T, dir string) *config.Snapshot {
 	}
 }
 
+// TestVerboseFanOutLogging: under a verbose logger, a multi-source fan-out emits a
+// job plan, one completion line per job, and a merge line; a single-pass run emits
+// the running/total record count. Quiet (nil logger) emits nothing.
+func TestVerboseFanOutLogging(t *testing.T) {
+	dir := t.TempDir()
+	snap := parallelSnapshot(t, dir)
+	in := filepath.Join(dir, "in.vcf")
+	if err := os.WriteFile(in, []byte(parallelInputVCF), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	ctx := WithLogger(context.Background(), NewLogger(&buf))
+	out := filepath.Join(dir, "out.vcf")
+	if err := AnnotateVCFSnapshot(ctx, &config.Config{}, snap, in, out, 4, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	log := buf.String()
+	// 2 tab sources + a builtins job = 3 fan-out jobs.
+	for _, want := range []string{"annotating 3 jobs", "job 1/3 complete", "job 3/3 complete", "merging 3 annotated parts"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("fan-out log missing %q; got:\n%s", want, log)
+		}
+	}
+
+	// Quiet: a nil logger in ctx must produce no output and still succeed.
+	quiet := WithLogger(context.Background(), nil)
+	if err := AnnotateVCFSnapshot(quiet, &config.Config{}, snap, in, filepath.Join(dir, "q.vcf"), 4, false, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
 const parallelInputVCF = "##fileformat=VCFv4.2\n" +
 	"##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n" +
 	"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n" +
@@ -73,7 +105,7 @@ func TestAnnotateVCFParallelMatchesSequential(t *testing.T) {
 
 	run := func(threads int) string {
 		out := filepath.Join(dir, fmt.Sprintf("out.t%d.vcf", threads))
-		if err := AnnotateVCFSnapshot(context.Background(), &config.Config{}, snap, in, out, nil, threads, false); err != nil {
+		if err := AnnotateVCFSnapshot(context.Background(), &config.Config{}, snap, in, out, threads, false, ""); err != nil {
 			t.Fatalf("threads=%d: %v", threads, err)
 		}
 		return out
@@ -123,7 +155,7 @@ func TestAnnotateVCFPerChromParallel(t *testing.T) {
 
 	run := func(threads int) string {
 		out := filepath.Join(dir, fmt.Sprintf("out.t%d.vcf", threads))
-		if err := AnnotateVCFSnapshot(context.Background(), &config.Config{}, snap, in, out, nil, threads, false); err != nil {
+		if err := AnnotateVCFSnapshot(context.Background(), &config.Config{}, snap, in, out, threads, false, ""); err != nil {
 			t.Fatalf("threads=%d: %v", threads, err)
 		}
 		return out

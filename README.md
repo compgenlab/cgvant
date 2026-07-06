@@ -59,12 +59,12 @@ Full documentation lives in **[`docs/`](docs/README.md)**:
 - **[Input & output formats](docs/io-formats.md)** — how variants go in and how results
   come out.
 - **[Registry](docs/registry.md)** — pulling pre-made sources, and submitting your own.
-- **[REST API](docs/rest-api.md)** — planned (placeholder).
+- **[REST API](docs/rest-api.md)** — the async annotate server (`cganno server`).
 
 ## Status
 
-Early but working: an interactive CLI on a SQLite backend. A Postgres backend and an
-asynchronous REST annotate endpoint are planned. Cohort-style filtering ("which loci are
+Early but working: an interactive CLI on a SQLite backend, plus an asynchronous REST annotate
+server (`cganno server`). A Postgres backend is planned. Cohort-style filtering ("which loci are
 pathogenic *and* rare") is intentionally out of scope — cganno produces the annotations; a
 consumer filters them.
 

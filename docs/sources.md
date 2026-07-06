@@ -67,10 +67,15 @@ One source can span several files, all queried and merged:
   annotation's `field` is the value column (a number, or a header column name).
 - **`bed`** — interval overlap; `field = "name"` (col 4), `"score"` (col 5), or a column
   number.
-- **`gtf`** — a GTF gene model read into memory (no tabix index). Its annotations select
-  from a fixed vocabulary of derived fields via `field`: `GENE`, `GENEID`, `STRAND`,
-  `BIOTYPE`, `REGION`, `CODING`, `NONCODING`. `gtf_tags = [...]` restricts to features
-  carrying every listed tag (e.g. `"basic"` for the GENCODE basic set).
+- **`gtf`** — a GTF gene model. cganno bgzip-compresses and tabix-indexes it (GFF preset)
+  once at `download` — cached under `cache_dir` and reused — then **queries it by position**,
+  reconstructing only the overlapping gene(s) per variant (bounded memory, so multiple large
+  GTFs no longer blow up whole-genome runs). If a bgzipped + tabix-indexed GTF (with a sibling
+  `.tbi`/`.csi`) is supplied via `localpath`, it is used directly. Without any index the whole
+  file is loaded into memory as a fallback (with a stderr warning). Its annotations select from
+  a fixed vocabulary of derived fields via `field`: `GENE`, `GENEID`, `STRAND`, `BIOTYPE`,
+  `REGION`, `CODING`, `NONCODING`. `gtf_tags = [...]` restricts to features carrying every
+  listed tag (e.g. `"basic"` for the GENCODE basic set).
 - **`bigwig`** — a UCSC bigWig (`.bw`): one numeric value per base. The annotation is that
   value at the variant position (`type = "numeric"`; no `field`). BBI files are
   **self-indexed** — downloaded whole and queried in place, with no tabix step. Only

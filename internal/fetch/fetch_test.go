@@ -110,13 +110,17 @@ func TestSourceGTFNoIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gtf source download: %v", err)
 	}
-	// Downloaded, but no tabix index built/expected.
-	if r.Data != "downloaded" || r.Index != "none" {
-		t.Errorf("gtf: got data=%s index=%s, want downloaded/none", r.Data, r.Index)
+	// Downloaded, then bgzip+tabix-indexed (built once, under cache_dir).
+	if r.Data != "downloaded" || r.Index != "built" {
+		t.Errorf("gtf: got data=%s index=%s, want downloaded/built", r.Data, r.Index)
 	}
-	// With the data file present and no index, the source is complete.
+	// The built index + its .tbi exist, so the source is complete.
 	if m := Missing(cfg, src); m != nil {
-		t.Errorf("gtf source should not be Missing, got %v", m)
+		t.Errorf("gtf source should not be Missing after indexing, got %v", m)
+	}
+	idx := cfg.ResolveGTFIndexPath(src)
+	if !fileExists(idx) || !fileExists(idx+".tbi") {
+		t.Errorf("expected %s + .tbi to exist", idx)
 	}
 }
 
@@ -431,5 +435,50 @@ func TestSourceBigWigNoIndex(t *testing.T) {
 	}
 	if m := Missing(cfg, src); m != nil {
 		t.Errorf("bigwig source should not be Missing, got %v", m)
+	}
+}
+
+// TestEnsureIndexedGTF: an unsorted, plain GTF is sorted + bgzipped + tabix-indexed
+// under cache_dir, and a second call reuses it (no rebuild).
+func TestEnsureIndexedGTF(t *testing.T) {
+	dir := t.TempDir()
+	// Deliberately out of coordinate order — the tabix writer sorts it.
+	raw := filepath.Join(dir, "genes.gtf")
+	body := "chr1\tt\texon\t5000\t6000\t.\t-\t.\tgene_id \"B\";\n" +
+		"chr1\tt\tgene\t1000\t2000\t.\t+\t.\tgene_id \"A\";\n" +
+		"chr1\tt\texon\t1000\t2000\t.\t+\t.\tgene_id \"A\";\n"
+	if err := os.WriteFile(raw, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	src := config.Source{Name: "gencode", Version: "44", Format: "gtf", LocalPath: raw}
+
+	idx, status, err := EnsureIndexedGTF(cfg, src, false)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if status != "built" {
+		t.Errorf("first call status = %q, want built", status)
+	}
+	if idx != cfg.ResolveGTFIndexPath(src) {
+		t.Errorf("idx = %q, want %q", idx, cfg.ResolveGTFIndexPath(src))
+	}
+	if !fileExists(idx) || !fileExists(idx+".tbi") {
+		t.Fatalf("index or .tbi missing at %s", idx)
+	}
+	// The output must be a valid tabix file (sorted); opening it must succeed.
+	r, err := tabix.NewReader(idx)
+	if err != nil {
+		t.Fatalf("indexed output not readable: %v", err)
+	}
+	r.Close()
+
+	// Second call reuses the cached index.
+	_, status2, err := EnsureIndexedGTF(cfg, src, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status2 != "reused" {
+		t.Errorf("second call status = %q, want reused", status2)
 	}
 }

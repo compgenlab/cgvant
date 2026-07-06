@@ -58,6 +58,46 @@ func (e *Engine) Annotate(ctx context.Context, loci []model.Locus) (AnnotateResu
 	return AnnotateResult{ByLocus: byLocus, Version: e.Version(), Novel: novel}, nil
 }
 
+// Variant is the JSON-serializable annotation result for one locus: its
+// coordinates plus a name→value map. Shared by the CLI `--format json` output
+// and the REST server so both emit an identical schema.
+type Variant struct {
+	Chrom       string         `json:"chrom"`
+	Pos         int64          `json:"pos"`
+	Ref         string         `json:"ref"`
+	Alt         string         `json:"alt"`
+	Annotations map[string]any `json:"annotations"`
+}
+
+// BuildVariants reshapes an AnnotateResult into per-locus Variant objects, one
+// per input locus IN ORDER (so VCF line/allele order is preserved). The schema is
+// stable: every selected annotation name is a key — null when the locus has no
+// match — and numeric values are emitted as JSON numbers, everything else as
+// strings.
+func BuildVariants(loci []model.Locus, names []string, res AnnotateResult) []Variant {
+	out := make([]Variant, 0, len(loci))
+	for _, l := range loci {
+		v := Variant{Chrom: l.Chrom, Pos: l.Pos, Ref: l.Ref, Alt: l.Alt, Annotations: map[string]any{}}
+		rows := res.ByLocus[l.Key()]
+		for _, n := range names {
+			v.Annotations[n] = nil
+			for _, r := range rows {
+				if r.Key != n {
+					continue
+				}
+				if r.Value.IsNum {
+					v.Annotations[n] = r.Value.Num
+				} else {
+					v.Annotations[n] = r.Value.Str
+				}
+				break
+			}
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
 // ensureAnnotated returns annotations for all loci, running the annotator only
 // on cache misses and persisting the results. With no store (cache disabled) it
 // computes every locus fresh and persists nothing.

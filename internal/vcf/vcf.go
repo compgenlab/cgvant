@@ -66,6 +66,23 @@ func WriteLoci(path string, loci []model.Locus) error {
 	return w.Flush()
 }
 
+// ParseLocus parses a single "chrom:pos:ref:alt" locus (pos is 1-based). REF/ALT
+// are upper-cased to match VCF ingestion.
+func ParseLocus(s string) (model.Locus, error) {
+	parts := strings.Split(s, ":")
+	if len(parts) != 4 {
+		return model.Locus{}, fmt.Errorf("bad locus %q: want chrom:pos:ref:alt", s)
+	}
+	pos, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return model.Locus{}, fmt.Errorf("bad locus %q: pos %w", s, err)
+	}
+	return model.Locus{
+		Chrom: parts[0], Pos: pos,
+		Ref: strings.ToUpper(parts[2]), Alt: strings.ToUpper(parts[3]),
+	}, nil
+}
+
 // Read parses loci from a VCF stream.
 func Read(r io.Reader) ([]model.Locus, error) {
 	sc := bufio.NewScanner(r)

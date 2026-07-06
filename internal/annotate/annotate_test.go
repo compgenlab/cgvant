@@ -53,7 +53,7 @@ func TestAnnotateVCFWithTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := filepath.Join(dir, "out.vcf")
-	if err := AnnotateVCFSnapshot(context.Background(), &config.Config{}, rel, in, out, nil, 1, false); err != nil {
+	if err := AnnotateVCFSnapshot(context.Background(), &config.Config{}, rel, in, out, 1, false, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -138,10 +138,11 @@ func TestRunToolsForLoci(t *testing.T) {
 	}
 }
 
-// TestAnnotateVCFToolCached proves the tool-output cache: a tool runs only on
-// loci it hasn't seen. The fake tool logs each invocation and copies a prebuilt
-// output covering both alleles; we assert run counts across three annotations.
-func TestAnnotateVCFToolCached(t *testing.T) {
+// TestAnnotateVCFToolDirectNoCache: the bulk vcf path runs the tool over the WHOLE
+// input every call (no per-locus cache/skip), and the direct path works even when
+// the tool emits an UN-indexed bgzipped file — tool.Run's ensureIndex builds the
+// .tbi it needs. The fake tool logs each invocation; we assert the run count grows.
+func TestAnnotateVCFToolDirectNoCache(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
@@ -163,19 +164,11 @@ func TestAnnotateVCFToolCached(t *testing.T) {
 			Type: "tool", Name: "myvep", Version: "1", Format: "tab", RefCol: 3, AltCol: 4,
 			Steps: []config.Step{{
 				Name: "produce",
-				Run:  "echo run >> " + counter + "; cp " + pre + " {output}; cp " + pre + ".tbi {output}.tbi",
+				// Copy ONLY the bgzipped output (no .tbi) so ensureIndex must build it.
+				Run: "echo run >> " + counter + "; cp " + pre + " {output}",
 			}},
 		}},
 		Annotations: []config.Annotation{{Name: "VEP_SCORE", Source: "myvep", Field: "5", Type: "numeric"}},
-	}
-
-	st, err := sqlite.Open(filepath.Join(dir, "cache.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	if err := st.Init(ctx); err != nil {
-		t.Fatal(err)
 	}
 
 	runs := func() int {
@@ -197,7 +190,8 @@ func TestAnnotateVCFToolCached(t *testing.T) {
 			t.Fatal(err)
 		}
 		out := filepath.Join(dir, name+".out.vcf")
-		if err := AnnotateVCFSnapshot(ctx, &config.Config{}, rel, in, out, st, 1, false); err != nil {
+		// No store: the bulk vcf path never uses the cache.
+		if err := AnnotateVCFSnapshot(ctx, &config.Config{}, rel, in, out, 1, false, ""); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
 		data, err := os.ReadFile(out)
@@ -223,22 +217,114 @@ func TestAnnotateVCFToolCached(t *testing.T) {
 		t.Fatalf("run1: tool ran %d times, want 1", got)
 	}
 
-	// Run 2: A>G is cached, A>T is novel → the tool runs once more (for A>T).
+	// Run 2: full input again → the tool runs again (no cache skip).
 	annotate("r2", gRec+tRec, map[string]string{
 		"chr1\t100\t.\tA\tG": "0.42",
 		"chr1\t100\t.\tA\tT": "0.99",
 	})
 	if got := runs(); got != 2 {
-		t.Fatalf("run2: tool ran %d times total, want 2", got)
+		t.Fatalf("run2: tool ran %d times total, want 2 (no cache skip)", got)
 	}
 
-	// Run 3: both alleles cached → the tool does NOT run again.
-	annotate("r3", gRec+tRec, map[string]string{
-		"chr1\t100\t.\tA\tG": "0.42",
-		"chr1\t100\t.\tA\tT": "0.99",
-	})
+	// Run 3: still no cache → the tool runs a third time.
+	annotate("r3", gRec+tRec, nil)
+	if got := runs(); got != 3 {
+		t.Fatalf("run3: tool ran %d times total, want 3 (no cache skip)", got)
+	}
+}
+
+// TestAnnotateVCFToolCacheDir: --tool-cache-dir saves each tool's produced output
+// (+ index, a run manifest, and a drop-in source stub), then REUSES it on a later
+// run with the same input — skipping the tool — and re-runs when the input changes.
+func TestAnnotateVCFToolCacheDir(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	pre := filepath.Join(dir, "pre.tab.gz")
+	w := tabix.NewWriter(pre, tabix.NewWriterOpts().Columns(1, 2, 0).AutoIndex())
+	if err := w.Write("chr1\t100\tA\tG\t0.42"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	counter := filepath.Join(dir, "runs.log")
+	runs := func() int {
+		b, _ := os.ReadFile(counter)
+		return strings.Count(string(b), "run\n")
+	}
+	rel := &config.Snapshot{
+		Name: "r",
+		Sources: []config.Source{{
+			Type: "tool", Name: "myvep", Version: "1", Format: "tab", RefCol: 3, AltCol: 4,
+			Steps:       []config.Step{{Name: "produce", Run: "echo run >> " + counter + "; cp " + pre + " {output}"}},
+			Annotations: []config.Annotation{{Name: "VEP_SCORE", Field: "5", Type: "numeric"}},
+		}},
+		Annotations: []config.Annotation{{Name: "VEP_SCORE", Source: "myvep", Field: "5", Type: "numeric"}},
+	}
+	in := filepath.Join(dir, "in.vcf")
+	if err := os.WriteFile(in, []byte("##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"+
+		"chr1\t100\t.\tA\tG\t.\t.\t.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := filepath.Join(dir, "toolcache")
+
+	run := func(name string) {
+		t.Helper()
+		out := filepath.Join(dir, name+".vcf")
+		if err := AnnotateVCFSnapshot(ctx, &config.Config{}, rel, in, out, 1, false, cacheDir); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		data, _ := os.ReadFile(out)
+		if !strings.Contains(string(data), "VEP_SCORE=0.42") {
+			t.Errorf("%s: output missing VEP_SCORE=0.42:\n%s", name, data)
+		}
+	}
+
+	// Run 1 (cache miss): the tool runs and its output is saved to the cache dir.
+	run("r1")
+	if got := runs(); got != 1 {
+		t.Fatalf("run1: tool ran %d times, want 1", got)
+	}
+	gz, _ := filepath.Glob(filepath.Join(cacheDir, "myvep-1.*.tab.gz"))
+	if len(gz) != 1 {
+		t.Fatalf("want 1 cached .tab.gz, got %v", gz)
+	}
+	if _, err := os.Stat(gz[0] + ".tbi"); err != nil {
+		t.Errorf("missing index for cached output %s", gz[0])
+	}
+	// A run manifest and a drop-in source stub are written too.
+	if m, _ := filepath.Glob(filepath.Join(cacheDir, "myvep-1.*.run.toml")); len(m) != 1 {
+		t.Fatalf("want 1 run manifest, got %v", m)
+	}
+	stubs, _ := filepath.Glob(filepath.Join(cacheDir, "myvep-1.*.toml"))
+	// The .run.toml also matches *.toml; the stub is the other one.
+	var stub string
+	for _, s := range stubs {
+		if !strings.HasSuffix(s, ".run.toml") {
+			stub = s
+		}
+	}
+	if frag, err := config.ReadFragment(stub); err != nil || len(frag.Sources) != 1 ||
+		frag.Sources[0].LocalPath != gz[0] || len(frag.Sources[0].Annotations) != 1 {
+		t.Errorf("stub invalid (%v): %+v", err, frag)
+	}
+
+	// Run 2 (cache hit — same input): the tool does NOT run again.
+	run("r2")
+	if got := runs(); got != 1 {
+		t.Fatalf("run2: tool ran %d times total, want 1 (cache hit)", got)
+	}
+
+	// Change the input (bump mtime + content) → cache miss → the tool runs again.
+	if err := os.WriteFile(in, []byte("##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"+
+		"chr1\t100\t.\tA\tG\t.\t.\t.\nchr1\t200\t.\tC\tT\t.\t.\t.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("r3")
 	if got := runs(); got != 2 {
-		t.Fatalf("run3: tool ran %d times total, want 2 (cache hit)", got)
+		t.Fatalf("run3: tool ran %d times total, want 2 (input changed → miss)", got)
 	}
 }
 
@@ -287,14 +373,14 @@ func TestAnnotateVCFSourcesAndTools(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p, err := BuildPipeline(rel, func(s config.Source) []config.SourceFile {
+	p, err := BuildPipeline(&config.Config{CacheDir: t.TempDir()}, rel, func(s config.Source) []config.SourceFile {
 		return []config.SourceFile{{Path: s.LocalPath}}
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := filepath.Join(dir, "out.vcf")
-	if err := AnnotateVCF(p, in, out); err != nil {
+	if err := AnnotateVCF(context.Background(), p, in, out, ""); err != nil {
 		t.Fatal(err)
 	}
 

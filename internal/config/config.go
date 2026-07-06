@@ -71,6 +71,7 @@ type Config struct {
 	Registries      []string             `toml:"registries,omitempty"` // multiple registries (HTTPS registry.toml URLs)
 	Database        Database             `toml:"database"`
 	References      map[string]Reference `toml:"references,omitempty"` // assembly -> reference FASTA
+	Server          ServerConfig         `toml:"server,omitempty"`     // REST annotate server (cganno server)
 
 	dir string `toml:"-"` // directory holding config.toml, for resolving paths
 }
@@ -100,6 +101,18 @@ func (c *Config) RegistryLocations() []string {
 type Database struct {
 	Backend string `toml:"backend"` // "sqlite" (default) or "postgres"
 	Path    string `toml:"path"`    // file path (sqlite) or DSN (postgres)
+}
+
+// ServerConfig configures the `cganno server` REST annotate service (the
+// [server] block). Optional — only consulted when `cganno server` runs. Tokens
+// authenticating the /v1 API are HMAC-signed with MasterKey; a valid one is
+// printed to stdout at startup. Jobs and results persist in DB (its own SQLite
+// database, separate from the annotation cache).
+type ServerConfig struct {
+	Endpoint  string `toml:"endpoint,omitempty"`   // IP:port to listen on (e.g. "127.0.0.1:8080")
+	MasterKey string `toml:"master_key,omitempty"` // HMAC signing key for API tokens
+	Workers   int    `toml:"workers,omitempty"`    // async worker pool size (default 1)
+	DB        string `toml:"db,omitempty"`         // job-queue SQLite path (default "cganno_server.db")
 }
 
 // Reference pins the reference genome FASTA for one assembly (used by external
@@ -743,6 +756,13 @@ func Load(path string) (*Config, error) {
 	if c.AnnotationsDir == "" {
 		c.AnnotationsDir = "annotations"
 	}
+	// Server defaults (the [server] block is optional; only used by `cganno server`).
+	if c.Server.Workers <= 0 {
+		c.Server.Workers = 1
+	}
+	if c.Server.DB == "" {
+		c.Server.DB = "cganno_server.db"
+	}
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
@@ -1161,6 +1181,10 @@ func (c *Config) DatabasePathAbs() string {
 	return c.resolveDir(c.Database.Path)
 }
 
+// ServerDBPathAbs is the server job-queue database path resolved relative to
+// CGANNO_HOME (the config dir); an absolute path is returned unchanged.
+func (c *Config) ServerDBPathAbs() string { return c.resolveDir(c.Server.DB) }
+
 // CacheDirAbs is the source-file cache directory resolved relative to the config
 // file. Defaults to "<data_dir>/cache" (or "cache") when cache_dir is unset.
 func (c *Config) CacheDirAbs() string {
@@ -1192,6 +1216,14 @@ func (c *Config) ResolveSourcePath(s Source) string {
 		base = s.Name + ".gz"
 	}
 	return filepath.Join(c.CacheDirAbs(), s.Name, s.Version, base)
+}
+
+// ResolveGTFIndexPath is the canonical on-disk location for a GTF source's
+// bgzipped + tabix-indexed form, under cache_dir keyed by name/version. cganno
+// builds it once (at download, or lazily on first annotate) so the gene model can
+// be queried by position instead of loaded whole into memory.
+func (c *Config) ResolveGTFIndexPath(s Source) string {
+	return filepath.Join(c.CacheDirAbs(), s.Name, s.Version, s.Name+".gtf.gz")
 }
 
 // resolveLocalIndex returns the resolved on-disk index path when LocalPathIndex is

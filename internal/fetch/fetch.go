@@ -7,6 +7,8 @@
 package fetch
 
 import (
+	"bufio"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -134,7 +136,17 @@ func Snapshot(ctx context.Context, cfg *config.Config, snap *config.Snapshot, on
 
 	results := make([]Result, 0, len(works)+len(builds)+len(tools))
 	for _, w := range works {
-		results = append(results, aggregate(w.src, w.results))
+		r := aggregate(w.src, w.results)
+		// GTF sources are bgzip+tabix-indexed (cached, reused) so the gene model can
+		// be queried by position instead of loaded whole into memory.
+		if w.src.IsGTFSource() {
+			_, status, err := EnsureIndexedGTF(cfg, w.src, force)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", w.src.ID(), err)
+			}
+			r.Index = status
+		}
+		results = append(results, r)
 	}
 	// Build sources (download inputs + run preprocessing) — sequential; heavy.
 	for _, s := range builds {
@@ -375,7 +387,15 @@ func Source(ctx context.Context, cfg *config.Config, src config.Source, force bo
 		}
 		results[i] = fileResult{ds, is}
 	}
-	return aggregate(src, results), nil
+	r := aggregate(src, results)
+	if src.IsGTFSource() {
+		_, status, err := EnsureIndexedGTF(cfg, src, force)
+		if err != nil {
+			return Result{}, fmt.Errorf("%s: %w", src.ID(), err)
+		}
+		r.Index = status
+	}
+	return r, nil
 }
 
 // fetchFile downloads one concrete source file (verifying its checksum when
@@ -522,8 +542,21 @@ func Missing(cfg *config.Config, src config.Source) []string {
 			missing = append(missing, f.Path)
 			continue
 		}
-		if src.IsGTFSource() || src.IsBBISource() {
-			continue // GTF read in-memory / BBI self-indexed; no sidecar index expected
+		if src.IsGTFSource() {
+			// A GTF is queried via a bgzip+tabix index built under cache_dir; report
+			// it missing until `cganno download` has produced it (unless the raw file
+			// is already a bgzipped GTF with a sidecar index).
+			if strings.HasSuffix(f.Path, ".gz") && (fileExists(f.Path+".tbi") || fileExists(f.Path+".csi")) {
+				continue
+			}
+			idx := cfg.ResolveGTFIndexPath(src)
+			if !fileExists(idx) || !(fileExists(idx+".tbi") || fileExists(idx+".csi")) {
+				missing = append(missing, idx+" (GTF index)")
+			}
+			continue
+		}
+		if src.IsBBISource() {
+			continue // BBI self-indexed; no sidecar index expected
 		}
 		hasIndex := fileExists(f.Path+".tbi") || fileExists(f.Path+".csi") ||
 			(f.IndexPath != "" && fileExists(f.IndexPath))
@@ -594,9 +627,113 @@ func presetFor(format string) (*tabix.WriterOpts, error) {
 		return tabix.NewWriterOpts().BED(), nil
 	case "tab":
 		return tabix.NewWriterOpts().Columns(1, 2, 0).Meta('#'), nil
+	case "gtf", "gff":
+		return tabix.NewWriterOpts().GFF(), nil
 	default:
-		return nil, fmt.Errorf("cannot build index for format %q (want vcf|bed|tab)", format)
+		return nil, fmt.Errorf("cannot build index for format %q (want vcf|bed|tab|gtf)", format)
 	}
+}
+
+// EnsureIndexedGTF returns a bgzipped + tabix(GFF)-indexed path for a GTF source,
+// building it once under cache_dir and reusing it on later calls (so `cganno
+// download` produces it and annotation is O(1) memory per query). If the source's
+// raw file is already a bgzipped GTF with a sidecar .tbi/.csi, it is used directly.
+// status is "pre-indexed" | "reused" | "built". force rebuilds the cached index.
+func EnsureIndexedGTF(cfg *config.Config, src config.Source, force bool) (path, status string, err error) {
+	raw := cfg.ResolveSourcePath(src)
+	if !fileExists(raw) {
+		return "", "", fmt.Errorf("GTF source file %s not found (run `cganno download`)", raw)
+	}
+	// A .gz raw with a sidecar tabix index is already usable directly.
+	if strings.HasSuffix(raw, ".gz") && (fileExists(raw+".tbi") || fileExists(raw+".csi")) {
+		return raw, "pre-indexed", nil
+	}
+	idx := cfg.ResolveGTFIndexPath(src)
+	if idx == raw {
+		return "", "", fmt.Errorf("GTF index path %s collides with the source file", idx)
+	}
+	if !force && fileExists(idx) && (fileExists(idx+".tbi") || fileExists(idx+".csi")) {
+		return idx, "reused", nil
+	}
+	if err := buildGTFIndex(raw, idx); err != nil {
+		return "", "", fmt.Errorf("index GTF %s: %w", raw, err)
+	}
+	return idx, "built", nil
+}
+
+// buildGTFIndex streams a GTF (plain / gzip / bgzip) into a sorted, bgzipped,
+// GFF-tabix-indexed file. The tabix writer sorts by coordinate with a bounded
+// memory footprint (spilling to temp BGZF), so even a whole GENCODE GTF indexes in
+// one pass without loading it all into memory. On any failure the partial output +
+// index are removed so a later run rebuilds rather than treating them as cached.
+func buildGTFIndex(raw, idx string) (err error) {
+	if err := os.MkdirAll(filepath.Dir(idx), 0o755); err != nil {
+		return err
+	}
+	in, err := openMaybeGz(raw)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	w := tabix.NewWriter(idx, tabix.NewWriterOpts().GFF().AutoIndex())
+	cleanup := func() { os.Remove(idx); os.Remove(idx + ".tbi"); os.Remove(idx + ".csi") }
+
+	sc := bufio.NewScanner(in)
+	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		if len(line) == 0 || line[0] == '#' {
+			continue // GTF comment/meta lines are not indexed data
+		}
+		if err := w.Write(line); err != nil {
+			w.Close()
+			cleanup()
+			return err
+		}
+	}
+	if err := sc.Err(); err != nil {
+		w.Close()
+		cleanup()
+		return err
+	}
+	if err := w.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
+}
+
+// openMaybeGz opens path, transparently decompressing a .gz/.bgz suffix (BGZF is a
+// series of gzip members, read in multistream mode by compress/gzip).
+func openMaybeGz(path string) (io.ReadCloser, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasSuffix(path, ".gz") || strings.HasSuffix(path, ".bgz") {
+		gz, err := gzip.NewReader(bufio.NewReader(f))
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		return gzCloser{gz, f}, nil
+	}
+	return f, nil
+}
+
+// gzCloser closes the gzip reader then the underlying file.
+type gzCloser struct {
+	*gzip.Reader
+	f *os.File
+}
+
+func (c gzCloser) Close() error {
+	err := c.Reader.Close()
+	if e := c.f.Close(); e != nil && err == nil {
+		err = e
+	}
+	return err
 }
 
 // download streams url to dest atomically (via a .tmp + rename). When sum is a

@@ -1,0 +1,312 @@
+package server
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/compgenlab/cganno/internal/config"
+	"github.com/compgenlab/cganno/internal/vcf"
+)
+
+// maxVCFUpload caps an uploaded VCF at 64 MiB (sites-only, so this is generous).
+const maxVCFUpload = 64 << 20
+
+// --- annotation discovery + selection -------------------------------------
+
+type annotationInfo struct {
+	Name        string `json:"name"`
+	Field       string `json:"field,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Description string `json:"description,omitempty"`
+	Default     bool   `json:"default"`
+}
+
+type sourceInfo struct {
+	Name        string           `json:"name"`
+	Version     string           `json:"version,omitempty"`
+	Type        string           `json:"type"` // "data" | "builtin" | "tool"
+	Annotations []annotationInfo `json:"annotations"`
+}
+
+type annotationsResponse struct {
+	Snapshot string       `json:"snapshot"`
+	Assembly string       `json:"assembly"`
+	Sources  []sourceInfo `json:"sources"`
+}
+
+// sourceKind names a source's kind for the discovery payload.
+func sourceKind(s config.Source) string {
+	switch {
+	case s.IsBuiltinSource():
+		return "builtin"
+	case s.IsTool():
+		return "tool"
+	default:
+		return "data"
+	}
+}
+
+// describeAnnotations builds the discovery payload from the loaded snapshot: each
+// source and the annotation fields it exposes, marking the default-set members.
+func (s *Server) describeAnnotations() annotationsResponse {
+	resp := annotationsResponse{Snapshot: s.snap.Name, Assembly: s.snap.Assembly}
+	// Index the flat, derived annotation list (carries Source + Default) by source.
+	for _, src := range s.snap.Sources {
+		info := sourceInfo{Name: src.Name, Version: src.Version, Type: sourceKind(src), Annotations: []annotationInfo{}}
+		for _, a := range s.snap.Annotations {
+			if !annotationBelongs(a, src) {
+				continue
+			}
+			info.Annotations = append(info.Annotations, annotationInfo{
+				Name: a.Name, Field: a.Field, Type: a.Type, Description: a.Description, Default: a.Default,
+			})
+		}
+		resp.Sources = append(resp.Sources, info)
+	}
+	return resp
+}
+
+// annotationBelongs reports whether the flat annotation a was declared on source
+// src. For a builtin container the derived Source is the builtin name, so match on
+// the builtin's presence in the source's nested annotations.
+func annotationBelongs(a config.Annotation, src config.Source) bool {
+	if src.IsBuiltinSource() {
+		for _, sa := range src.Annotations {
+			if sa.Builtin == a.Source && sa.Name == a.Name {
+				return true
+			}
+		}
+		return false
+	}
+	return a.Source == src.Name
+}
+
+func (s *Server) handleAnnotations(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.describeAnnotations())
+}
+
+// resolveSelection turns a stored selection string into the concrete annotation
+// set: "" → the snapshot defaults, "all" → every annotation, else a comma list of
+// names (unknown names error).
+func resolveSelection(snap *config.Snapshot, selection string) ([]config.Annotation, error) {
+	selection = strings.TrimSpace(selection)
+	if selection == "all" {
+		return snap.SelectAnnotations(nil, true)
+	}
+	var keys []string
+	for _, k := range strings.Split(selection, ",") {
+		if k = strings.TrimSpace(k); k != "" {
+			keys = append(keys, k)
+		}
+	}
+	return snap.SelectAnnotations(keys, false)
+}
+
+func annotationNames(anns []config.Annotation) []string {
+	names := make([]string, 0, len(anns))
+	for _, a := range anns {
+		if a.Name != "" {
+			names = append(names, a.Name)
+		}
+	}
+	return names
+}
+
+// selectionField accepts the request's "annotations" value in either shape — the
+// string "all", or an array of annotation names — and normalizes it to the stored
+// selection string ("" = defaults, "all", or a comma-joined name list).
+type selectionField struct {
+	all   bool
+	names []string
+	set   bool
+}
+
+func (sf *selectionField) UnmarshalJSON(b []byte) error {
+	sf.set = true
+	var asString string
+	if err := json.Unmarshal(b, &asString); err == nil {
+		if strings.EqualFold(asString, "all") {
+			sf.all = true
+		} else if s := strings.TrimSpace(asString); s != "" {
+			sf.names = splitCSV(s)
+		}
+		return nil
+	}
+	return json.Unmarshal(b, &sf.names)
+}
+
+func (sf selectionField) selection() string {
+	if sf.all {
+		return "all"
+	}
+	return strings.Join(sf.names, ",")
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// --- submit handlers -------------------------------------------------------
+
+type annotateLocusRequest struct {
+	Locus       string         `json:"locus"`
+	Snapshot    string         `json:"snapshot,omitempty"`
+	Annotations selectionField `json:"annotations,omitempty"`
+}
+
+// handleAnnotateLocus serves POST /v1/annotate and POST /ui/submit: it validates
+// the locus + annotation selection, enqueues a locus job, and returns its id.
+func (s *Server) handleAnnotateLocus(w http.ResponseWriter, r *http.Request) {
+	var req annotateLocusRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Locus) == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing \"locus\" (chrom:pos:ref:alt)")
+		return
+	}
+	if !s.snapshotOK(w, req.Snapshot) {
+		return
+	}
+	selection := req.Annotations.selection()
+	if !s.validate(w, req.Locus, selection) {
+		return
+	}
+	s.enqueue(w, r, KindLocus, selection, []byte(req.Locus))
+}
+
+// handleAnnotateVCF serves POST /v1/annotate/vcf: a multipart VCF upload (field
+// "vcf"), with optional "snapshot" and "annotations" form fields. It enqueues a
+// vcf job whose input is the uploaded bytes.
+func (s *Server) handleAnnotateVCF(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(maxVCFUpload); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
+		return
+	}
+	file, _, err := r.FormFile("vcf")
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "missing \"vcf\" file field")
+		return
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, maxVCFUpload))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "read upload: "+err.Error())
+		return
+	}
+	if len(body) == 0 {
+		writeJSONError(w, http.StatusBadRequest, "uploaded VCF is empty")
+		return
+	}
+	if !s.snapshotOK(w, r.FormValue("snapshot")) {
+		return
+	}
+	// annotations form field is a comma-separated list, or "all".
+	var selection string
+	if raw := strings.TrimSpace(r.FormValue("annotations")); raw != "" {
+		if strings.EqualFold(raw, "all") {
+			selection = "all"
+		} else {
+			selection = strings.Join(splitCSV(raw), ",")
+		}
+	}
+	if !s.validateSelection(w, selection) {
+		return
+	}
+	s.enqueue(w, r, KindVCF, selection, body)
+}
+
+// snapshotOK enforces that a request's optional snapshot matches the one the
+// server is pinned to (arbitrary-snapshot requests are not supported yet).
+func (s *Server) snapshotOK(w http.ResponseWriter, name string) bool {
+	if name != "" && name != s.snap.Name {
+		writeJSONError(w, http.StatusBadRequest,
+			"server is pinned to snapshot "+s.snap.Name+"; remove \"snapshot\" or match it")
+		return false
+	}
+	return true
+}
+
+// validate checks both the locus syntax and the annotation selection up front, so
+// the client gets immediate 400s rather than a failed job.
+func (s *Server) validate(w http.ResponseWriter, locus, selection string) bool {
+	if _, err := vcf.ParseLocus(locus); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return false
+	}
+	return s.validateSelection(w, selection)
+}
+
+func (s *Server) validateSelection(w http.ResponseWriter, selection string) bool {
+	if _, err := resolveSelection(s.snap, selection); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return false
+	}
+	return true
+}
+
+// enqueue records a job and writes the 202 { job_id } response.
+func (s *Server) enqueue(w http.ResponseWriter, r *http.Request, kind, selection string, body []byte) {
+	id, err := s.queue.Enqueue(r.Context(), kind, s.snap.Name, selection, body)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "enqueue: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"job_id": id})
+}
+
+// --- job status + results --------------------------------------------------
+
+func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
+	job, ok, err := s.queue.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, "unknown job id")
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, ok, err := s.queue.Get(r.Context(), id)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, "unknown job id")
+		return
+	}
+	switch job.Status {
+	case StatusDone:
+		result, ok, err := s.queue.Result(r.Context(), id)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !ok {
+			writeJSONError(w, http.StatusInternalServerError, "job done but result missing")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(result)
+	case StatusError:
+		writeJSONError(w, http.StatusUnprocessableEntity, "job failed: "+job.Error)
+	default:
+		writeJSONError(w, http.StatusConflict, "job not finished (status: "+job.Status+")")
+	}
+}

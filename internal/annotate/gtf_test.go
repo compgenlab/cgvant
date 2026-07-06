@@ -1,6 +1,7 @@
 package annotate
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,12 +29,13 @@ func TestSourceAnnotatorsGTF(t *testing.T) {
 	if err := os.WriteFile(gtfPath, []byte(gtfFixture), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	cfg := &config.Config{CacheDir: t.TempDir()}
 	src := config.Source{Name: "gencode", Version: "38", Format: "gtf", LocalPath: gtfPath}
 	anns := []config.Annotation{
 		{Name: "gene", Source: "gencode", Field: "GENE", Type: "text"},
 		{Name: "region", Source: "gencode", Field: "REGION", Type: "categorical"},
 	}
-	got, err := SourceAnnotators(src, anns, []config.SourceFile{{Path: gtfPath}})
+	got, err := SourceAnnotators(cfg, src, anns, []config.SourceFile{{Path: gtfPath}})
 	if err != nil {
 		t.Fatalf("SourceAnnotators: %v", err)
 	}
@@ -71,7 +73,8 @@ func TestBuildPipelineGTF(t *testing.T) {
 		},
 	}
 
-	p, err := BuildPipeline(snap, func(s config.Source) []config.SourceFile {
+	cfg := &config.Config{CacheDir: t.TempDir()}
+	p, err := BuildPipeline(cfg, snap, func(s config.Source) []config.SourceFile {
 		return []config.SourceFile{{Path: s.LocalPath}}
 	})
 	if err != nil {
@@ -93,7 +96,7 @@ func TestBuildPipelineGTF(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := filepath.Join(dir, "out.vcf")
-	if err := AnnotateVCF(p, in, out); err != nil {
+	if err := AnnotateVCF(context.Background(), p, in, out, ""); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(out)
@@ -138,8 +141,10 @@ func TestGTFHeaderDefs(t *testing.T) {
 	if err := os.WriteFile(gtfPath, []byte(gtfFixture), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	cfg := &config.Config{CacheDir: t.TempDir()}
 	a, err := buildGTF(
-		config.Source{Name: "g", Version: "1", Format: "gtf"},
+		cfg,
+		config.Source{Name: "g", Version: "1", Format: "gtf", LocalPath: gtfPath},
 		[]config.Annotation{{Name: "gene", Field: "GENE"}, {Name: "rgn", Field: "region"}},
 		[]config.SourceFile{{Path: gtfPath}},
 	)

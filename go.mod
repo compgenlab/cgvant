@@ -8,10 +8,14 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/compgenlab/hts v0.5.1
+	github.com/compgenlab/hts v0.5.2
 	golang.org/x/sync v0.20.0
 	modernc.org/sqlite v1.53.0
 )
+
+// TODO(dev): drop once hts v0.5.2 is pushed. Builds against the local hts v0.5.2
+// working tree (the tag is not yet on the module proxy). Build with GOWORK=off.
+replace github.com/compgenlab/hts => ../cgio-hts/hts
 
 require (
 	github.com/atotto/clipboard v0.1.4 // indirect

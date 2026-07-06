@@ -40,6 +40,11 @@ cganno annotate [--all | -a name,…] [--format tab|vcf|json|text] [-o FILE] <vc
 
 - **`--format`** selects the rendering; the default is **`tab`**.
 - **`-o FILE`** writes the output to a file (stdout if omitted) — for *any* format.
+- **`-v` / `--verbose`** prints progress to **stderr** (stdout still carries the results):
+  which phase is running (external tool, pipeline build, single-pass vs. an N-job fan-out),
+  a running variant/record count, per-job completion during a parallel (`-t N`) run, and — on
+  the individual-locus path — external-tool cache hits (how many loci are novel vs. cached).
+  Off by default.
 - **`--all`** applies every annotation; **`-a name[,name…]`** applies the named ones;
   with neither, the snapshot's `default_annotations` are applied.
 
@@ -56,6 +61,33 @@ cganno annotate --format json chr1:100:A:G         # → JSON array
 cganno annotate --format vcf -o out.vcf in.vcf     # → annotated VCF (samples preserved)
 cganno annotate -a clinvar_sig -o hits.tsv in.vcf  # → TSV of one annotation, to a file
 ```
+
+### External tools & the tool-output cache
+
+How an external `type="tool"` source (VEP/ANNOVAR) runs depends on the **input**:
+
+- **Bulk VCF** — `--format vcf`, `annotate file.vcf`, and REST VCF uploads run the tool **once
+  over the whole input** and annotate directly from its (already-indexed) output. The per-locus
+  tool cache is **not** used: for a whole VCF, where most variants are novel, the round-trip of
+  writing every result into the cache and reading it back to rebuild an index is pure overhead.
+- **Individual loci** — `annotate chrom:pos:ref:alt` and REST single-locus lookups **do** use the
+  per-locus cache: a tool runs only on loci it hasn't seen, so repeat lookups skip the (often
+  slow, containerized) tool entirely.
+
+On the bulk-VCF path, **`--tool-cache-dir DIR`** turns DIR into a per-input tool-output cache:
+
+- **Reuse (automatic):** before running a tool, if DIR holds a saved output whose recorded input
+  matches the current one — same absolute path, size, and mtime — for this tool `name:version`
+  and assembly, that output is reused and the tool is **not** run. (A cache hit needs neither the
+  tool nor its container engine, so you can annotate from a prior VEP run on a host without it.)
+- **Save (automatic):** on a miss, the tool runs and its output (`<name>-<version>.<timestamp>.<fmt>.gz`
+  + `.tbi`/`.csi`), a **run manifest** (`.run.toml`, recording the input), and a drop-in
+  `[[sources]]` stub (`.toml`) are written to DIR. Timestamps keep runs from colliding; files are
+  never overwritten.
+
+Regenerating the input bumps its mtime, so a stale output is never reused. You can also reference
+a saved file directly as a normal static source (drop its `.toml` stub under
+`annotations_dir/sources/`).
 
 The `tab` output columns are fixed (`chrom pos ref alt` + one per annotation) and are
 unrelated to a `tab` *source's* `ref_col`/`alt_col` (which describe how that source file is

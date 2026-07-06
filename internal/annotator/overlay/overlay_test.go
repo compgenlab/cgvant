@@ -68,7 +68,7 @@ func TestOverlayVCF(t *testing.T) {
 		{Name: "clinvar_sig", Source: "clinvar", Field: "CLNSIG", Type: "categorical"},
 		{Name: "af", Source: "clinvar", Field: "AF", Type: "numeric"},
 	}
-	s := NewSource(src, []config.SourceFile{{Path: path}}, anns)
+	s := NewSource(&config.Config{}, src, []config.SourceFile{{Path: path}}, anns)
 	ctx := context.Background()
 
 	t.Run("exact match A>G", func(t *testing.T) {
@@ -132,7 +132,7 @@ func TestOverlayMultiFile(t *testing.T) {
 	}
 	src := config.Source{Name: "split", Version: "1", Format: "vcf", URL: "https://x/{chrom}.vcf.gz", Chroms: []string{"chr1", "chr2"}}
 	anns := []config.Annotation{{Name: "clinvar_sig", Source: "split", Field: "CLNSIG", Type: "categorical"}}
-	s := NewSource(src, files, anns)
+	s := NewSource(&config.Config{}, src, files, anns)
 	ctx := context.Background()
 
 	for _, tc := range []struct{ chrom, want string }{{"chr1", "Pathogenic"}, {"chr2", "Benign"}} {
@@ -180,7 +180,7 @@ func TestOverlayUnionFiles(t *testing.T) {
 	}
 	src := config.Source{Name: "split", Version: "1", Format: "vcf"}
 	anns := []config.Annotation{{Name: "clinvar_sig", Source: "split", Field: "CLNSIG", Type: "categorical"}}
-	s := NewSource(src, files, anns)
+	s := NewSource(&config.Config{}, src, files, anns)
 	ctx := context.Background()
 
 	for _, tc := range []struct{ ref, alt, want string }{{"A", "G", "Coding"}, {"AT", "A", "Indel"}} {
@@ -218,7 +218,7 @@ func TestOverlayTabAlleleMatch(t *testing.T) {
 	path := writeIndexedTab(t, dir)
 	src := config.Source{Name: "revel", Version: "1", Format: "tab", LocalPath: path, RefCol: 3, AltCol: 4}
 	anns := []config.Annotation{{Name: "revel", Source: "revel", Field: "5", Type: "numeric"}}
-	s := NewSource(src, []config.SourceFile{{Path: path}}, anns)
+	s := NewSource(&config.Config{}, src, []config.SourceFile{{Path: path}}, anns)
 	ctx := context.Background()
 
 	for _, tc := range []struct {
@@ -260,7 +260,7 @@ func TestOverlayVCFKnobs(t *testing.T) {
 		{Name: "dbsnp_id", Source: "clinvar", Field: "@ID", Unique: true},              // copy source ID
 		{Name: "clinvar_sig", Source: "clinvar", Field: "CLNSIG", Type: "categorical"}, // exact value
 	}
-	s := NewSource(src, []config.SourceFile{{Path: path}}, anns)
+	s := NewSource(&config.Config{}, src, []config.SourceFile{{Path: path}}, anns)
 
 	// Exact A>G: all four fire.
 	m := rowsByKey(mustAnnotate(t, s, model.Locus{Chrom: "chr1", Pos: 100, Ref: "A", Alt: "G"}))
@@ -302,7 +302,7 @@ func TestOverlayBED(t *testing.T) {
 	path := writeIndexedBED(t, dir)
 	src := config.Source{Name: "gencode", Version: "45", Format: "bed", LocalPath: path}
 	anns := []config.Annotation{{Name: "gene", Source: "gencode", Field: "name", Type: "categorical"}}
-	s := NewSource(src, []config.SourceFile{{Path: path}}, anns)
+	s := NewSource(&config.Config{}, src, []config.SourceFile{{Path: path}}, anns)
 	ctx := context.Background()
 
 	rows, err := s.Annotate(ctx, []model.Locus{{Chrom: "chr1", Pos: 100, Ref: "A", Alt: "G"}})
@@ -330,7 +330,7 @@ func TestOverlayAutoConvertChromNaming(t *testing.T) {
 	path := writeIndexedVCF(t, dir) // source contigs are "chr1"
 	src := config.Source{Name: "clinvar", Version: "1", Format: "vcf", LocalPath: path}
 	anns := []config.Annotation{{Name: "clinvar_sig", Source: "clinvar", Field: "CLNSIG", Type: "categorical"}}
-	s := NewSource(src, []config.SourceFile{{Path: path}}, anns)
+	s := NewSource(&config.Config{}, src, []config.SourceFile{{Path: path}}, anns)
 
 	rows, err := s.Annotate(context.Background(), []model.Locus{{Chrom: "1", Pos: 100, Ref: "A", Alt: "G"}})
 	if err != nil {
@@ -353,7 +353,7 @@ func TestOverlayBigWig(t *testing.T) {
 	}
 	src := config.Source{Name: "cons", Version: "1", Format: "bigwig", LocalPath: bw}
 	anns := []config.Annotation{{Name: "cons_score", Source: "cons", Type: "numeric"}}
-	s := NewSource(src, []config.SourceFile{{Path: bw}}, anns)
+	s := NewSource(&config.Config{}, src, []config.SourceFile{{Path: bw}}, anns)
 	ctx := context.Background()
 
 	rows, err := s.Annotate(ctx, []model.Locus{{Chrom: "chr1", Pos: 100, Ref: "A", Alt: "G"}})
@@ -377,7 +377,7 @@ func TestOverlayBigBed(t *testing.T) {
 	}
 	src := config.Source{Name: "clinvar", Version: "1", Format: "bigbed", LocalPath: bb}
 	anns := []config.Annotation{{Name: "sig", Source: "clinvar", Field: "name", Type: "categorical"}}
-	s := NewSource(src, []config.SourceFile{{Path: bb}}, anns)
+	s := NewSource(&config.Config{}, src, []config.SourceFile{{Path: bb}}, anns)
 
 	rows, err := s.Annotate(context.Background(), []model.Locus{{Chrom: "chr1", Pos: 150, Ref: "A", Alt: "G"}})
 	if err != nil {
@@ -403,7 +403,7 @@ func TestOverlayPerAltBigWig(t *testing.T) {
 	}
 	src := config.Source{Name: "am", Version: "1", Format: "bigwig", LocalPath: filepath.Join(dir, "{alt}.bw")}
 	anns := []config.Annotation{{Name: "am_score", Source: "am", Type: "numeric"}}
-	s := NewSource(src, files, anns)
+	s := NewSource(&config.Config{}, src, files, anns)
 	ctx := context.Background()
 
 	// alt G → g.bw = 0.3

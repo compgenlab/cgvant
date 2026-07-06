@@ -41,12 +41,10 @@ import (
 	"strings"
 
 	annotatepkg "github.com/compgenlab/cganno/internal/annotate"
-	"github.com/compgenlab/cganno/internal/annotator"
-	"github.com/compgenlab/cganno/internal/annotator/overlay"
 	"github.com/compgenlab/cganno/internal/config"
 	"github.com/compgenlab/cganno/internal/engine"
-	"github.com/compgenlab/cganno/internal/fetch"
 	"github.com/compgenlab/cganno/internal/model"
+	"github.com/compgenlab/cganno/internal/service"
 	"github.com/compgenlab/cganno/internal/store"
 	"github.com/compgenlab/cganno/internal/store/sqlite"
 	"github.com/compgenlab/cganno/internal/vcf"
@@ -117,6 +115,8 @@ func run(args []string) error {
 		return cmdAnnotation(*cfgPath, cmdArgs)
 	case "annotate":
 		return cmdAnnotate(ctx, *cfgPath, *snapshotName, cmdArgs)
+	case "server":
+		return cmdServer(ctx, *cfgPath, *snapshotName, cmdArgs)
 	case "download":
 		return cmdDownload(ctx, *cfgPath, *snapshotName, cmdArgs)
 	case "registry":
@@ -166,8 +166,10 @@ config commands:
   registry submit <name[:version]> [--dry-run]  propose a source to the public registry
 
 annotation commands:
-  annotate [--all|-a name,...] [--format tab|vcf|json|text] [-o FILE] <vcf|locus...>
-                               annotate loci (default format: tab; -o writes to a file)
+  annotate [--all|-a name,...] [--format tab|vcf|json|text] [-o FILE] [-v] <vcf|locus...>
+                               annotate loci (default format: tab; -o writes to a file; -v prints progress)
+                               vcf output: --tool-cache-dir DIR caches/reuses tool output by input
+  server [-addr IP:port]       run the async REST annotate server (needs a [server] config block)
   versions                     show the active snapshot
   version                      print the cganno version
 `)
@@ -196,7 +198,7 @@ func buildEngineWith(ctx context.Context, cfg *config.Config, snap *config.Snaps
 	if err != nil {
 		return nil, nil, err
 	}
-	eng, err := newEngineOverStore(ctx, cfg, snap, st, nil)
+	eng, err := service.NewEngineOverStore(ctx, cfg, snap, st, nil)
 	if err != nil {
 		if st != nil {
 			st.Close()
@@ -208,37 +210,6 @@ func buildEngineWith(ctx context.Context, cfg *config.Config, snap *config.Snaps
 			st.Close()
 		}
 	}, nil
-}
-
-// newEngineOverStore builds the annotate engine over an already-open store: the
-// overlay annotator is one tabix source per pinned (non-builtin) source, plus
-// `extra` sources (e.g. tool outputs projected via Tool.AsSource, used on the
-// cache/locus path) read from their LocalPath.
-func newEngineOverStore(ctx context.Context, cfg *config.Config, snap *config.Snapshot, st store.Store, extra []config.Source) (*engine.Engine, error) {
-	var srcs []annotator.SourceAnnotator
-	for _, s := range snap.Sources {
-		if s.IsTool() {
-			continue // tool sources have no static file; their output arrives via `extra`
-		}
-		if s.IsBuiltinSource() {
-			// The variant-only builtins (auto_id/indel/tstv/tags) compute from the
-			// locus alone, so they run on this path too; sample-derived builtins and
-			// vardist are skipped (NewBuiltinSource filters them).
-			srcs = append(srcs, overlay.NewBuiltinSource(s))
-			continue
-		}
-		srcs = append(srcs, overlay.NewSource(s, cfg.ResolveSourceFiles(s), snap.Annotations))
-	}
-	for _, s := range extra {
-		srcs = append(srcs, overlay.NewSource(s, []config.SourceFile{{Path: s.LocalPath}}, snap.Annotations))
-	}
-	ann := annotator.NewComposite(srcs, 0)
-
-	eng := engine.New(st, ann, snap.Name, snap.Assembly, snap.DataSources())
-	if err := eng.Init(ctx); err != nil {
-		return nil, err
-	}
-	return eng, nil
 }
 
 // openStore opens the configured annotation-cache backend.
@@ -269,6 +240,9 @@ func cmdAnnotate(ctx context.Context, cfgPath, snapshot string, args []string) e
 	threads := fs.Int("threads", 1, "vcf output: annotate this many sources in parallel (0 = all CPUs); each runs a full pass to a temp file, then merges")
 	fs.IntVar(threads, "t", 1, "shorthand for --threads")
 	keepTemp := fs.Bool("keep-temp", false, "vcf output: keep the per-source temp part files (for debugging the fan-out)")
+	toolCacheDir := fs.String("tool-cache-dir", "", "vcf output: directory used as a per-input tool-output cache — reuse a saved output matching this input+tool+assembly (skip the tool), else run it and save the output there")
+	verbose := fs.Bool("verbose", false, "print progress to stderr (phases, tool cache hits, variant counts)")
+	fs.BoolVar(verbose, "v", false, "shorthand for --verbose")
 	var keys stringList
 	fs.Var(&keys, "annotation", "annotation name to apply (repeatable, comma-separated)")
 	fs.Var(&keys, "a", "shorthand for --annotation")
@@ -282,6 +256,12 @@ func cmdAnnotate(ctx context.Context, cfgPath, snapshot string, args []string) e
 	if *all && len(keys) > 0 {
 		return fmt.Errorf("use --all or -a, not both")
 	}
+
+	// Under -v, carry a nil-safe progress logger through the pipeline via ctx.
+	if *verbose {
+		ctx = annotatepkg.WithLogger(ctx, annotatepkg.NewLogger(os.Stderr))
+	}
+	lg := annotatepkg.LoggerFrom(ctx)
 
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
@@ -305,25 +285,18 @@ func cmdAnnotate(ctx context.Context, cfgPath, snapshot string, args []string) e
 		sub := *snap
 		sub.Annotations = selected
 		sub.Sources = withSelectedTools(snap, selected)
-		if err := requireSources(cfg, snap, selected); err != nil {
+		if err := service.RequireSources(cfg, snap, selected); err != nil {
 			return err
 		}
-		var st store.Store
-		if len(referencedTools(snap, selected)) > 0 && cfg.CacheEnabled() {
-			if st, err = openStore(cfg); err != nil {
-				return err
-			}
-			defer st.Close()
-			if err := st.Init(ctx); err != nil {
-				return err
-			}
-		}
+		// Bulk VCF: tools run over the whole input and annotate from their indexed
+		// output directly — the per-locus tool cache is skipped, so no store is needed.
 		inPath, cleanup, err := annotateInputVCF(rest)
 		if err != nil {
 			return err
 		}
 		defer cleanup()
-		return annotatepkg.AnnotateVCFSnapshot(ctx, cfg, &sub, inPath, *out, st, *threads, *keepTemp)
+		lg.Logf("annotating VCF %s → %s", inPath, vcfOutName(*out))
+		return annotatepkg.AnnotateVCFSnapshot(ctx, cfg, &sub, inPath, *out, *threads, *keepTemp, *toolCacheDir)
 	}
 
 	if *format != "tab" && *format != "json" && *format != "text" {
@@ -332,57 +305,34 @@ func cmdAnnotate(ctx context.Context, cfgPath, snapshot string, args []string) e
 	if len(rest) == 0 {
 		return fmt.Errorf("usage: annotate [--format tab|vcf|json|text] <vcf|locus...>  (locus = chrom:pos:ref:alt)")
 	}
+	// A single VCF-file input is a bulk request: referenced tools run over the whole
+	// input directly (cache skipped), matching the --format vcf path. Bare loci are
+	// individual queries and keep the per-locus tool cache.
+	inputIsVCF := len(rest) == 1 && fileExists(rest[0])
 	loci, err := readLoci(rest)
 	if err != nil {
 		return err
 	}
+	lg.Logf("annotating %s loci (%d annotation(s) selected)", annotatepkg.Count(len(loci)), len(selected))
 
-	// The engine annotates all sources (keeping the cache complete), so every
-	// source must be present; the selection only filters what's shown.
-	if err := requireSources(cfg, snap, snap.Annotations); err != nil {
-		return err
-	}
 	st, err := openStore(cfg)
 	if err != nil {
 		return err
 	}
-	closeStore := func() {
+	defer func() {
 		if st != nil {
 			st.Close()
 		}
-	}
-	cleanup := closeStore
-	defer func() { cleanup() }()
+	}()
 
-	// Run any tool sources (VEP/ANNOVAR) referenced by the selected annotations over
-	// the requested loci, projecting each tool's cached output as a source the engine
-	// overlays. Selection-aware so we don't launch an expensive tool unless asked.
-	var toolSrcs []config.Source
-	if tools := referencedTools(snap, selected); len(tools) > 0 {
-		if st != nil {
-			if err := st.Init(ctx); err != nil {
-				return err
-			}
-		}
-		workdir, err := os.MkdirTemp("", "cganno-loci-tools-")
-		if err != nil {
-			return err
-		}
-		cleanup = func() { closeStore(); os.RemoveAll(workdir) }
-		toolSrcs, err = annotatepkg.RunToolsForLoci(ctx, cfg, tools, st, loci, workdir, snap.Reference, snap.Assembly)
-		if err != nil {
-			return err
-		}
-	}
-
-	eng, err := newEngineOverStore(ctx, cfg, snap, st, toolSrcs)
+	// Annotate over the shared locus path (verifies sources, runs any referenced
+	// tool sources, builds the engine, and annotates) — the same path the server uses.
+	res, err := service.AnnotateLoci(ctx, cfg, snap, st, selected, loci, inputIsVCF)
 	if err != nil {
 		return err
 	}
-	res, err := eng.Annotate(ctx, loci)
-	if err != nil {
-		return err
-	}
+	lg.Logf("done: %s loci annotated (%s newly computed, rest from cache)",
+		annotatepkg.Count(len(loci)), annotatepkg.Count(res.Novel))
 
 	w := io.Writer(os.Stdout)
 	if *out != "" && *out != "-" {
@@ -405,7 +355,7 @@ func withSelectedTools(snap *config.Snapshot, selected []config.Annotation) []co
 			out = append(out, s)
 		}
 	}
-	return append(out, referencedTools(snap, selected)...)
+	return append(out, service.ReferencedTools(snap, selected)...)
 }
 
 // readLoci parses loci from CLI args: a single existing file is read as a VCF,
@@ -488,34 +438,11 @@ func formatResults(w io.Writer, format string, loci []model.Locus, selected []co
 		}
 		return bw.Flush()
 	case "json":
-		type variant struct {
-			Chrom       string         `json:"chrom"`
-			Pos         int64          `json:"pos"`
-			Ref         string         `json:"ref"`
-			Alt         string         `json:"alt"`
-			Annotations map[string]any `json:"annotations"`
-		}
-		out := make([]variant, 0, len(loci))
-		for _, l := range loci {
-			v := variant{Chrom: l.Chrom, Pos: l.Pos, Ref: l.Ref, Alt: l.Alt, Annotations: map[string]any{}}
-			// Schema-stable: every selected annotation is a key, null when absent —
-			// so the JSON object shape matches the TSV columns across all variants.
-			for _, n := range names {
-				if r, ok := valOf(l, n); ok {
-					if r.Value.IsNum {
-						v.Annotations[n] = r.Value.Num
-					} else {
-						v.Annotations[n] = r.Value.Str
-					}
-				} else {
-					v.Annotations[n] = nil
-				}
-			}
-			out = append(out, v)
-		}
+		// Shared schema with the REST server (engine.BuildVariants): an array of
+		// per-variant objects, every selected annotation a key (null when absent).
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		return enc.Encode(out)
+		return enc.Encode(engine.BuildVariants(loci, names, res))
 	case "text":
 		bw := bufio.NewWriter(w)
 		for _, l := range loci {
@@ -545,64 +472,22 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
-// referencedTools returns the snapshot's tool sources whose output is read by a
-// selected annotation (so unused tools — e.g. VEP — aren't run).
-func referencedTools(snap *config.Snapshot, anns []config.Annotation) []config.Source {
-	need := map[string]bool{}
-	for _, a := range anns {
-		need[a.Source] = true
-	}
-	var out []config.Source
-	for _, s := range snap.ToolSources() {
-		if need[s.Name] {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-// requireSources errors if any file-based source referenced by anns isn't fully
-// present on disk (tool sources are generated at run time, so skipped).
-func requireSources(cfg *config.Config, snap *config.Snapshot, anns []config.Annotation) error {
-	seen := map[string]bool{}
-	var problems []string
-	for _, a := range anns {
-		src := snap.SourceByName(a.Source)
-		if src == nil || src.IsTool() || seen[src.ID()] {
-			continue
-		}
-		seen[src.ID()] = true
-		if m := fetch.Missing(cfg, *src); len(m) > 0 {
-			problems = append(problems, fmt.Sprintf("%s (missing %s)", src.ID(), m[0]))
-		}
-	}
-	if len(problems) > 0 {
-		return fmt.Errorf("sources not downloaded — run `cganno download`:\n  %s", strings.Join(problems, "\n  "))
-	}
-	return nil
-}
-
 func cmdVersions(eng *engine.Engine) error {
 	fmt.Printf("snapshot: %s\n", eng.Version())
 	return nil
 }
 
-func parseLocus(s string) (model.Locus, error) {
-	parts := strings.Split(s, ":")
-	if len(parts) != 4 {
-		return model.Locus{}, fmt.Errorf("bad locus %q: want chrom:pos:ref:alt", s)
-	}
-	pos, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		return model.Locus{}, fmt.Errorf("bad locus %q: pos %w", s, err)
-	}
-	return model.Locus{
-		Chrom: parts[0], Pos: pos,
-		Ref: strings.ToUpper(parts[2]), Alt: strings.ToUpper(parts[3]),
-	}, nil
-}
+func parseLocus(s string) (model.Locus, error) { return vcf.ParseLocus(s) }
 
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+// vcfOutName renders a VCF output destination for -v logs (stdout shown as "(stdout)").
+func vcfOutName(out string) string {
+	if out == "" || out == "-" {
+		return "(stdout)"
+	}
+	return out
 }

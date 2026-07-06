@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/compgenlab/hts/htsio/tabix"
 
@@ -38,11 +39,14 @@ func runToolCached(ctx context.Context, st store.Store, t config.Tool, assembly 
 	if err != nil {
 		return err
 	}
+	lg := LoggerFrom(ctx)
 	uid := toolUID(t, assembly)
+	t0 := time.Now()
 	done, err := st.ToolProcessed(ctx, uid, loci)
 	if err != nil {
 		return err
 	}
+	lg.Logf("tool %s: checked cache for %s loci [%s]", t.ID(), commaCount(len(loci)), took(t0))
 	var novel []model.Locus
 	novelKeys := make(map[string]bool)
 	for _, l := range loci {
@@ -51,6 +55,13 @@ func runToolCached(ctx context.Context, st store.Store, t config.Tool, assembly 
 			novel = append(novel, l)
 			novelKeys[k] = true
 		}
+	}
+
+	if len(novel) == 0 {
+		lg.Logf("tool %s: all %s loci already cached", t.ID(), commaCount(len(loci)))
+	} else {
+		lg.Logf("tool %s: %s of %s loci are novel — running the tool on those",
+			t.ID(), commaCount(len(novel)), commaCount(len(loci)))
 	}
 
 	if len(novel) > 0 {
@@ -64,13 +75,20 @@ func runToolCached(ctx context.Context, st store.Store, t config.Tool, assembly 
 		if err := tool.Run(ctx, t, rp); err != nil {
 			return err
 		}
+		lg.Logf("tool %s: finished; parsing output", t.ID())
+		t1 := time.Now()
 		header, lines, err := parseToolOutput(raw, t)
 		if err != nil {
 			return fmt.Errorf("tool %s: parse output: %w", t.ID(), err)
 		}
+		lg.Logf("tool %s: parsed output for %s loci [%s]", t.ID(), commaCount(len(lines)), took(t1))
+		// PutToolOutput writes every novel locus's lines + processed markers in ONE
+		// transaction on the single-connection cache DB — a single-threaded phase.
+		t2 := time.Now()
 		if err := st.PutToolOutput(ctx, uid, header, lines, novel); err != nil {
 			return err
 		}
+		lg.Logf("tool %s: wrote %s novel loci to the cache DB [%s]", t.ID(), commaCount(len(novel)), took(t2))
 	}
 
 	// Rebuild outFile from the cache for ALL input loci (not just the novel ones).
@@ -78,12 +96,25 @@ func runToolCached(ctx context.Context, st store.Store, t config.Tool, assembly 
 	if err != nil {
 		return err
 	}
+	// ToolLines reads every input locus's cached lines back out (chunked, single
+	// connection) — the other single-threaded cache phase.
+	t3 := time.Now()
 	cached, err := st.ToolLines(ctx, uid, loci)
 	if err != nil {
 		return err
 	}
-	return writeRebuilt(outFile, header, cached, t.Format)
+	lg.Logf("tool %s: loaded %s cached lines for %s loci [%s]",
+		t.ID(), commaCount(len(cached)), commaCount(len(loci)), took(t3))
+	t4 := time.Now()
+	if err := writeRebuilt(outFile, header, cached, t.Format); err != nil {
+		return err
+	}
+	lg.Logf("tool %s: rebuilt + indexed output [%s]", t.ID(), took(t4))
+	return nil
 }
+
+// took formats elapsed time since t0 for a progress line (ms precision).
+func took(t0 time.Time) string { return time.Since(t0).Round(time.Millisecond).String() }
 
 // toolUID is the opaque cache key for a tool's output. It folds the assembly into
 // the tool's name:version ID so a tool run under GRCh38 never serves cached lines

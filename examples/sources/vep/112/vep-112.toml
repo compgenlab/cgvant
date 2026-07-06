@@ -19,9 +19,13 @@
 # So `INSTALL.pl -c {datadir}` is portable on any machine. Host steps
 # (container = false) keep real host paths; the workdir is shared between the two.
 #
-# Output is cached per locus: on later `annotate` runs the tool executes only on
-# loci it hasn't seen (under this snapshot's assembly). Bump `version` whenever the
-# image, setup, or steps change — that invalidates the cache.
+# Output is cached per locus for INDIVIDUAL-locus queries (`annotate chr…:pos:ref:alt`,
+# REST single-locus): on later runs the tool executes only on loci it hasn't seen
+# (under this snapshot's assembly). BULK VCF annotation (`--format vcf`, `annotate
+# file.vcf`, REST VCF uploads) skips the cache and runs the tool over the whole input,
+# annotating from its output directly (use `--tool-cache-dir` to save + auto-reuse that
+# output for the same input across runs).
+# Bump `version` whenever the image, setup, or steps change — that invalidates the cache.
 #
 # `requires` lists host executables that must be on PATH; `cganno download` and
 # `cganno annotate` check them up front and fail fast if any is missing. The

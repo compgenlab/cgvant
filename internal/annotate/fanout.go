@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -107,14 +109,16 @@ func subSnapshot(snap *config.Snapshot, job annJob) *config.Snapshot {
 // input concurrently (up to `threads` at once), each writing a temp part VCF, then
 // merging the parts positionally. Falls back to a single sequential pass when there
 // is nothing to parallelize (≤1 job). Temp parts are removed unless keepTemp.
-func annotateVCFFanOut(cfg *config.Config, snap *config.Snapshot, inPath, outPath string, threads int, keepTemp bool) error {
+func annotateVCFFanOut(ctx context.Context, cfg *config.Config, snap *config.Snapshot, inPath, outPath string, threads int, keepTemp bool) error {
+	lg := LoggerFrom(ctx)
 	jobs := splitAnnotationJobs(cfg, snap)
 	if len(jobs) <= 1 {
-		p, err := BuildPipeline(snap, cfg.ResolveSourceFiles)
+		lg.Logf("annotating in a single pass (only one parallelizable job)")
+		p, err := BuildPipeline(cfg, snap, cfg.ResolveSourceFiles)
 		if err != nil {
 			return err
 		}
-		return AnnotateVCF(p, inPath, outPath)
+		return AnnotateVCF(ctx, p, inPath, outPath, "")
 	}
 
 	tmpDir, err := os.MkdirTemp("", "cganno-annotate-")
@@ -127,28 +131,49 @@ func annotateVCFFanOut(cfg *config.Config, snap *config.Snapshot, inPath, outPat
 		defer os.RemoveAll(tmpDir)
 	}
 
+	lg.Logf("annotating %d jobs across up to %d threads (one full pass per source)", len(jobs), threads)
 	parts := make([]string, len(jobs))
-	g, _ := errgroup.WithContext(context.Background())
+	g, ctx := errgroup.WithContext(ctx)
 	if threads > 0 {
 		g.SetLimit(threads)
 	}
+	done := 0
+	var mu sync.Mutex
 	for i, job := range jobs {
 		i, job := i, job
 		part := filepath.Join(tmpDir, fmt.Sprintf("part.%02d.vcf.gz", i))
 		parts[i] = part
 		g.Go(func() error {
-			p, err := BuildPipeline(subSnapshot(snap, job), job.resolve)
+			p, err := BuildPipeline(cfg, subSnapshot(snap, job), job.resolve)
 			if err != nil {
 				return fmt.Errorf("annotate job %q: %w", job.label, err)
 			}
-			if err := AnnotateVCF(p, inPath, part); err != nil {
+			if err := AnnotateVCF(ctx, p, inPath, part, job.label); err != nil {
 				return fmt.Errorf("annotate job %q: %w", job.label, err)
 			}
+			mu.Lock()
+			done++
+			lg.Logf("job %d/%d complete (%s)", done, len(jobs), job.label)
+			mu.Unlock()
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
 		return err
 	}
-	return mergeAnnotatedParts(inPath, parts, outPath)
+	lg.Logf("merging %d annotated parts → %s (single-threaded)", len(parts), outName(outPath))
+	tm := time.Now()
+	if err := mergeAnnotatedParts(inPath, parts, outPath); err != nil {
+		return err
+	}
+	lg.Logf("merge complete [%s]", took(tm))
+	return nil
+}
+
+// outName renders an output destination for logs (stdout shown as "-").
+func outName(outPath string) string {
+	if outPath == "" || outPath == "-" {
+		return "(stdout)"
+	}
+	return outPath
 }

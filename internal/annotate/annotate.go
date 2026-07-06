@@ -25,13 +25,21 @@ import (
 	ivcf "github.com/compgenlab/cganno/internal/vcf"
 )
 
-// AnnotateVCFSnapshot annotates inPath → outPath for a whole snapshot: it first
-// runs any external tools (VEP/ANNOVAR) over the input — each producing an
-// indexed output file added as a source — then runs the hts pipeline over all
-// sources + builtins. When st is non-nil, tool output is cached per locus so each
-// tool runs only on loci it hasn't seen before (see runToolCached); pass nil to
-// always run the tool over the whole input.
-func AnnotateVCFSnapshot(ctx context.Context, cfg *config.Config, snap *config.Snapshot, inPath, outPath string, st store.Store, threads int, keepTemp bool) error {
+// AnnotateVCFSnapshot annotates inPath → outPath for a whole snapshot. This is the
+// bulk-VCF path: it runs any external tools (VEP/ANNOVAR) over the WHOLE input —
+// each producing an indexed output file — and annotates directly from those files,
+// then runs the hts pipeline over all sources + builtins. It deliberately does NOT
+// use the per-locus tool cache: for a whole VCF that round-trip (write every line
+// to SQLite, read it all back to rebuild an index) is pure overhead, since the
+// tool's own output is already indexed (tool.Run/ensureIndex). The per-locus cache
+// is reserved for individual-locus queries (see RunToolsForLoci).
+//
+// When toolCacheDir is non-empty it is used as a file-based, per-input tool-output
+// cache: a matching prior output is reused (skipping the tool) and fresh output is
+// saved there for later runs (see runTools / lookupToolCache / storeToolCache).
+func AnnotateVCFSnapshot(ctx context.Context, cfg *config.Config, snap *config.Snapshot, inPath, outPath string, threads int, keepTemp bool, toolCacheDir string) error {
+	lg := LoggerFrom(ctx)
+
 	// The "effective" snapshot is the one the pipeline runs over: with tool sources
 	// resolved to their generated output files. With no tools it is the snapshot itself.
 	eff := snap
@@ -43,10 +51,15 @@ func AnnotateVCFSnapshot(ctx context.Context, cfg *config.Config, snap *config.S
 		}
 		defer os.RemoveAll(workdir)
 
-		toolSrcs, err := runTools(ctx, cfg, toolSources, st, inPath, workdir, snap.Reference, snap.Assembly)
+		lg.Logf("resolving %d external tool(s) for the input (bulk VCF; per-locus cache skipped)…", len(toolSources))
+		// Pass a nil store so runTools takes the direct branch: run the tool over the
+		// whole input and use its indexed output as-is (no per-locus cache/rebuild).
+		toolSrcs, err := runTools(ctx, cfg, toolSources, nil, inPath, workdir, snap.Reference, snap.Assembly, toolCacheDir)
 		if err != nil {
 			return err
 		}
+		lg.Logf("tool(s) ready")
+
 		// Replace the tool-type sources with their generated output sources, so the
 		// pipeline reads the produced files (by name) rather than the tool fragments.
 		aug := *snap
@@ -58,13 +71,14 @@ func AnnotateVCFSnapshot(ctx context.Context, cfg *config.Config, snap *config.S
 	// to `threads` concurrently), then merges the parts. threads <= 1 keeps the
 	// single sequential pass.
 	if threads > 1 {
-		return annotateVCFFanOut(cfg, eff, inPath, outPath, threads, keepTemp)
+		return annotateVCFFanOut(ctx, cfg, eff, inPath, outPath, threads, keepTemp)
 	}
-	p, err := BuildPipeline(eff, cfg.ResolveSourceFiles)
+	lg.Logf("annotating %d annotation(s) in a single pass (-t 1; pass -t N to parallelize across sources)", len(eff.Annotations))
+	p, err := BuildPipeline(cfg, eff, cfg.ResolveSourceFiles)
 	if err != nil {
 		return err
 	}
-	return AnnotateVCF(p, inPath, outPath)
+	return AnnotateVCF(ctx, p, inPath, outPath, "")
 }
 
 // nonToolSources returns a copy of srcs with type="tool" sources removed.
@@ -85,10 +99,30 @@ func nonToolSources(srcs []config.Source) []config.Source {
 // FASTA and `assembly` scopes the tool output cache. Each tool's assets are staged
 // from its own version dir. Shared by AnnotateVCFSnapshot (the -o path) and
 // RunToolsForLoci (the cache/locus path).
-func runTools(ctx context.Context, cfg *config.Config, toolSources []config.Source, st store.Store, inPath, workdir, ref, assembly string) ([]config.Source, error) {
+//
+// toolCacheDir (bulk-VCF path only; "" disables it) is a directory used as a
+// file-based, per-input tool-output cache: before running a tool, a previously
+// saved output whose recorded input matches inPath (same path+size+mtime), tool,
+// and assembly is reused as-is; otherwise the tool runs and its output is saved
+// there for next time. Reuse needs neither the tool nor its container engine.
+func runTools(ctx context.Context, cfg *config.Config, toolSources []config.Source, st store.Store, inPath, workdir, ref, assembly, toolCacheDir string) ([]config.Source, error) {
+	lg := LoggerFrom(ctx)
 	var out []config.Source
 	for _, src := range toolSources {
 		t := src.AsTool() // execution view of the type="tool" source
+
+		// Reuse a cached output for this exact input before any software check, so a
+		// cache hit needs neither the tool nor its container engine.
+		if st == nil && toolCacheDir != "" {
+			if cached, ok, err := lookupToolCache(toolCacheDir, t, assembly, inPath); err != nil {
+				return nil, err
+			} else if ok {
+				lg.Logf("tool %s: reusing cached output for this input (%s)", t.ID(), cached)
+				out = append(out, t.AsSource(cached))
+				continue
+			}
+		}
+
 		if err := software.Check(t.ID(), t.RequiredSoftware()); err != nil {
 			return nil, err
 		}
@@ -106,6 +140,7 @@ func runTools(ctx context.Context, cfg *config.Config, toolSources []config.Sour
 				return nil, err
 			}
 		} else {
+			lg.Logf("tool %s: running over the full input (no cache)", t.ID())
 			input := inPath // VCF tools take the input VCF as-is (samples preserved)
 			if !isVCFInput(t.InputFormat) {
 				loci, err := ivcf.ReadFile(inPath)
@@ -120,6 +155,12 @@ func runTools(ctx context.Context, cfg *config.Config, toolSources []config.Sour
 			p.Input, p.Output, p.Workdir = input, outFile, workdir
 			if err := tool.Run(ctx, t, p); err != nil {
 				return nil, err
+			}
+			if toolCacheDir != "" {
+				if err := storeToolCache(toolCacheDir, src, assembly, inPath, outFile); err != nil {
+					return nil, err
+				}
+				lg.Logf("tool %s: saved output to cache dir %s", t.ID(), toolCacheDir)
 			}
 		}
 		out = append(out, t.AsSource(outFile))
@@ -139,7 +180,8 @@ func RunToolsForLoci(ctx context.Context, cfg *config.Config, toolSources []conf
 	if err := ivcf.WriteLoci(lociVCF, loci); err != nil {
 		return nil, err
 	}
-	return runTools(ctx, cfg, toolSources, st, lociVCF, workdir, ref, assembly)
+	// The locus path uses the per-locus SQLite cache (st), not the file cache.
+	return runTools(ctx, cfg, toolSources, st, lociVCF, workdir, ref, assembly, "")
 }
 
 // BuildPipeline assembles the hts pipeline for a snapshot: one source annotator
@@ -150,7 +192,7 @@ func RunToolsForLoci(ctx context.Context, cfg *config.Config, toolSources []conf
 // single annotator (so the GTF gene model is parsed once, not per field). Those
 // grouped annotators are added after the per-annotation ones, in first-seen
 // source order — fine since GTF output is independent of other annotators.
-func BuildPipeline(snap *config.Snapshot, resolve func(config.Source) []config.SourceFile) (*htsann.Pipeline, error) {
+func BuildPipeline(cfg *config.Config, snap *config.Snapshot, resolve func(config.Source) []config.SourceFile) (*htsann.Pipeline, error) {
 	p := htsann.NewPipeline()
 
 	gtfGroups := map[string][]config.Annotation{}
@@ -189,7 +231,7 @@ func BuildPipeline(snap *config.Snapshot, resolve func(config.Source) []config.S
 
 	for _, name := range gtfOrder {
 		src := snap.SourceByName(name)
-		ann, err := buildGTF(*src, gtfGroups[name], resolve(*src))
+		ann, err := buildGTF(cfg, *src, gtfGroups[name], resolve(*src))
 		if err != nil {
 			return nil, err
 		}
@@ -240,9 +282,9 @@ func AnnotatorFor(src config.Source, a config.Annotation, files []config.SourceF
 // for all of them, so the gene model is parsed once (mirrors BuildPipeline's GTF
 // handling). The caller owns Close() on each returned annotator. This is the
 // shared entry point for the cache/locus path (see annotator/overlay).
-func SourceAnnotators(src config.Source, anns []config.Annotation, files []config.SourceFile) ([]htsann.Annotator, error) {
+func SourceAnnotators(cfg *config.Config, src config.Source, anns []config.Annotation, files []config.SourceFile) ([]htsann.Annotator, error) {
 	if src.IsGTFSource() {
-		ann, err := buildGTF(src, anns, files)
+		ann, err := buildGTF(cfg, src, anns, files)
 		if err != nil {
 			return nil, err
 		}
@@ -457,9 +499,20 @@ func builtinAnnotator(a config.Annotation) (htsann.Annotator, error) {
 	}
 }
 
+// progressEvery is how many records between running-count progress lines under -v.
+const progressEvery = 100_000
+
 // AnnotateVCF streams inPath through the pipeline to outPath ("" or "-" =
-// stdout). The input's header and samples are preserved.
-func AnnotateVCF(p *htsann.Pipeline, inPath, outPath string) error {
+// stdout). The input's header and samples are preserved. When ctx carries a
+// verbose Logger, it emits a running record count (prefixed by label, blank for a
+// single pass) and a final total.
+func AnnotateVCF(ctx context.Context, p *htsann.Pipeline, inPath, outPath, label string) error {
+	lg := LoggerFrom(ctx)
+	tag := ""
+	if label != "" {
+		tag = "[" + label + "] "
+	}
+
 	reader, err := vcf.NewVcfFile(inPath)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", inPath, err)
@@ -489,6 +542,7 @@ func AnnotateVCF(p *htsann.Pipeline, inPath, outPath string) error {
 		return err
 	}
 
+	n := 0
 	next := p.Build(reader.NextRecord)
 	for {
 		rec, err := next()
@@ -501,7 +555,12 @@ func AnnotateVCF(p *htsann.Pipeline, inPath, outPath string) error {
 		if err := writer.WriteRecord(rec); err != nil {
 			return err
 		}
+		n++
+		if n%progressEvery == 0 {
+			lg.Logf("%sannotated %s records…", tag, commaCount(n))
+		}
 	}
+	lg.Logf("%sdone: %s records annotated", tag, commaCount(n))
 	if err := p.Close(); err != nil {
 		return err
 	}

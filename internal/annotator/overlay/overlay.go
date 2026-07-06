@@ -18,21 +18,23 @@ import (
 
 // Source annotates loci from a tabix-indexed reference file (or per-chrom files).
 type Source struct {
+	cfg   *config.Config
 	src   config.Source
 	files []config.SourceFile
 	anns  []config.Annotation // annotations that read from this source
 }
 
 // NewSource builds an overlay annotator for one source over its resolved file(s),
-// keeping the annotation keys that name this source.
-func NewSource(src config.Source, files []config.SourceFile, anns []config.Annotation) *Source {
+// keeping the annotation keys that name this source. cfg lets GTF sources resolve
+// their bgzip+tabix index (see annotate.SourceAnnotators).
+func NewSource(cfg *config.Config, src config.Source, files []config.SourceFile, anns []config.Annotation) *Source {
 	var mine []config.Annotation
 	for _, a := range anns {
 		if a.Source == src.Name {
 			mine = append(mine, a)
 		}
 	}
-	return &Source{src: src, files: files, anns: mine}
+	return &Source{cfg: cfg, src: src, files: files, anns: mine}
 }
 
 // ID is the data_source_id rows are tagged with.
@@ -44,7 +46,7 @@ func (s *Source) Annotate(_ context.Context, loci []model.Locus) ([]model.AnnRow
 	if len(s.anns) == 0 {
 		return nil, nil
 	}
-	anns, err := annotate.SourceAnnotators(s.src, s.anns, s.files)
+	anns, err := annotate.SourceAnnotators(s.cfg, s.src, s.anns, s.files)
 	if err != nil {
 		return nil, fmt.Errorf("open source %s: %w", s.ID(), err)
 	}

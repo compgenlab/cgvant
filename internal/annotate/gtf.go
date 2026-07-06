@@ -2,6 +2,8 @@ package annotate
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/compgenlab/hts/bed"
@@ -9,7 +11,17 @@ import (
 	"github.com/compgenlab/hts/vcf"
 
 	"github.com/compgenlab/cganno/internal/config"
+	"github.com/compgenlab/cganno/internal/fetch"
 )
+
+// geneModel is the query surface an annotator needs from a GTF gene model, served
+// either by the whole-file in-memory gtf.AnnotationSource or the tabix-backed,
+// memory-bounded gtf.IndexedAnnotationSource.
+type geneModel interface {
+	FindGenes(ref string, start, end int) []*gtf.Gene
+	FindGenicRegionForPos(ref string, pos int, strand bed.Strand, geneID string) gtf.GenicRegion
+	RefNames() []string
+}
 
 // gtfField selects one GTF-derived value (key, one of config.GTFFields) and the
 // INFO tag to write it under.
@@ -25,24 +37,47 @@ type gtfField struct {
 // is parsed once regardless of how many fields are requested. Implements
 // htsann.Annotator.
 type gtfAnnotator struct {
-	src      *gtf.AnnotationSource
+	src      geneModel
 	fields   []gtfField
 	conv     *vcf.ContigConverter // cross-scheme contig matching (always on, like the other annotators)
 	filename string
+	closer   io.Closer // the indexed reader's tabix handle, if any
 }
 
-// newGTFAnnotator loads the GTF and returns an annotator for the given fields.
-func newGTFAnnotator(path string, requiredTags []string, fields []gtfField) (*gtfAnnotator, error) {
-	src, err := gtf.NewAnnotationSource(path, requiredTags)
+// newGTFAnnotator returns an annotator over a GTF source. It prefers the indexed
+// (tabix, memory-bounded) reader — ensuring the bgzip+tabix index exists (built
+// once, cached under cache_dir) — and falls back to loading the whole GTF into
+// memory (with a stderr warning) when no index is available.
+func newGTFAnnotator(cfg *config.Config, src config.Source, fields []gtfField) (*gtfAnnotator, error) {
+	tags := src.GTFTags
+	if indexed, _, err := fetch.EnsureIndexedGTF(cfg, src, false); err == nil {
+		if isrc, err := gtf.NewIndexedAnnotationSource(indexed, tags); err == nil {
+			return &gtfAnnotator{
+				src: isrc, fields: fields,
+				conv: vcf.NewContigConverter(isrc.RefNames()), filename: indexed, closer: isrc,
+			}, nil
+		} else {
+			warnUnindexedGTF(src, err)
+		}
+	} else {
+		warnUnindexedGTF(src, err)
+	}
+	// Fallback: the whole-file in-memory model.
+	raw := cfg.ResolveSourcePath(src)
+	msrc, err := gtf.NewAnnotationSource(raw, tags)
 	if err != nil {
 		return nil, err
 	}
 	return &gtfAnnotator{
-		src:      src,
-		fields:   fields,
-		conv:     vcf.NewContigConverter(src.RefNames()),
-		filename: path,
+		src: msrc, fields: fields,
+		conv: vcf.NewContigConverter(msrc.RefNames()), filename: raw,
 	}, nil
+}
+
+func warnUnindexedGTF(src config.Source, err error) {
+	fmt.Fprintf(os.Stderr,
+		"cganno: GTF %s: no usable tabix index (%v) — loading the whole file into memory (high RAM); run `cganno download` to build the index\n",
+		src.ID(), err)
 }
 
 func (a *gtfAnnotator) SetupHeader(h *vcf.VcfHeader) error {
@@ -80,15 +115,20 @@ func (a *gtfAnnotator) Annotate(rec *vcf.VcfRecord) error {
 	return nil
 }
 
-// Close is a no-op: the gene model lives in memory.
-func (a *gtfAnnotator) Close() error { return nil }
+// Close releases the indexed reader's tabix handle (a no-op for the in-memory model).
+func (a *gtfAnnotator) Close() error {
+	if a.closer != nil {
+		return a.closer.Close()
+	}
+	return nil
+}
 
 // gtfValue computes one field's comma-joined value across the overlapping genes.
 // GENE/GENEID/STRAND/REGION yield one value per gene (parallel order); BIOTYPE
 // fills "." for genes lacking one; CODING/NONCODING are the gene names filtered
 // by coding status (empty → the field is omitted for this record). Variants are
 // unstranded, so REGION is always a sense code.
-func gtfValue(src *gtf.AnnotationSource, ref string, pos0 int, genes []*gtf.Gene, key string) string {
+func gtfValue(src geneModel, ref string, pos0 int, genes []*gtf.Gene, key string) string {
 	var vals []string
 	for _, g := range genes {
 		switch key {
@@ -141,7 +181,7 @@ func gtfFieldDesc(key string) string {
 
 // buildGTF constructs one grouped annotator for a gtf source over its selected
 // annotations. A gtf source must resolve to a single file.
-func buildGTF(src config.Source, annos []config.Annotation, files []config.SourceFile) (*gtfAnnotator, error) {
+func buildGTF(cfg *config.Config, src config.Source, annos []config.Annotation, files []config.SourceFile) (*gtfAnnotator, error) {
 	if len(files) != 1 {
 		return nil, fmt.Errorf("gtf source %q must be a single file", src.ID())
 	}
@@ -149,5 +189,5 @@ func buildGTF(src config.Source, annos []config.Annotation, files []config.Sourc
 	for i, a := range annos {
 		fields[i] = gtfField{name: a.Name, key: strings.ToUpper(a.FieldName())}
 	}
-	return newGTFAnnotator(files[0].Path, src.GTFTags, fields)
+	return newGTFAnnotator(cfg, src, fields)
 }
