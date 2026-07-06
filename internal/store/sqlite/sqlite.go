@@ -158,13 +158,17 @@ func (s *Store) Annotations(ctx context.Context, assembly string, loci []model.L
 		}
 		batch := loci[start:end]
 		var preds []string
-		args := []any{assembly}
+		var args []any
+		// The scoping column (assembly) is repeated INSIDE each OR term so every
+		// disjunct is a full prefix of the PK index (assembly,chrom,pos,ref,alt,…);
+		// factored outside the OR, SQLite can't use the index and full-scans the
+		// table per chunk — fatal once the cache is large.
 		for _, l := range batch {
-			preds = append(preds, "(chrom=? AND pos=? AND ref=? AND alt=?)")
-			args = append(args, l.Chrom, l.Pos, l.Ref, l.Alt)
+			preds = append(preds, "(assembly=? AND chrom=? AND pos=? AND ref=? AND alt=?)")
+			args = append(args, assembly, l.Chrom, l.Pos, l.Ref, l.Alt)
 		}
 		q := `SELECT chrom,pos,ref,alt,data_source_id,key,value_text,value_num
-		      FROM annotation WHERE assembly=? AND (` + strings.Join(preds, " OR ") + `)`
+		      FROM annotation WHERE ` + strings.Join(preds, " OR ")
 		rows, err := s.db.QueryContext(ctx, q, args...)
 		if err != nil {
 			return nil, err
@@ -241,13 +245,15 @@ func (s *Store) ToolProcessed(ctx context.Context, toolUID string, loci []model.
 			end = len(loci)
 		}
 		preds := make([]string, 0, end-start)
-		args := []any{toolUID}
+		var args []any
+		// tool_uid repeated inside each OR term so every disjunct is a prefix of the
+		// PK index (tool_uid,chrom,pos,ref,alt); see Annotations for why.
 		for _, l := range loci[start:end] {
-			preds = append(preds, "(chrom=? AND pos=? AND ref=? AND alt=?)")
-			args = append(args, l.Chrom, l.Pos, l.Ref, l.Alt)
+			preds = append(preds, "(tool_uid=? AND chrom=? AND pos=? AND ref=? AND alt=?)")
+			args = append(args, toolUID, l.Chrom, l.Pos, l.Ref, l.Alt)
 		}
-		q := `SELECT chrom,pos,ref,alt FROM tool_processed WHERE tool_uid=? AND (` +
-			strings.Join(preds, " OR ") + `)`
+		q := `SELECT chrom,pos,ref,alt FROM tool_processed WHERE ` +
+			strings.Join(preds, " OR ")
 		rows, err := s.db.QueryContext(ctx, q, args...)
 		if err != nil {
 			return nil, err
@@ -312,13 +318,15 @@ func (s *Store) ToolLines(ctx context.Context, toolUID string, loci []model.Locu
 			end = len(sites)
 		}
 		preds := make([]string, 0, end-start)
-		args := []any{toolUID}
+		var args []any
+		// tool_uid repeated inside each OR term so every disjunct is a prefix of the
+		// tool_line_pos index (tool_uid,chrom,pos); see Annotations for why.
 		for _, st := range sites[start:end] {
-			preds = append(preds, "(chrom=? AND pos=?)")
-			args = append(args, st.chrom, st.pos)
+			preds = append(preds, "(tool_uid=? AND chrom=? AND pos=?)")
+			args = append(args, toolUID, st.chrom, st.pos)
 		}
-		q := `SELECT chrom,pos,line FROM tool_line WHERE tool_uid=? AND (` +
-			strings.Join(preds, " OR ") + `)`
+		q := `SELECT chrom,pos,line FROM tool_line WHERE ` +
+			strings.Join(preds, " OR ")
 		rows, err := s.db.QueryContext(ctx, q, args...)
 		if err != nil {
 			return nil, err
@@ -366,22 +374,19 @@ func (s *Store) PutToolOutput(ctx context.Context, toolUID string, header []stri
 		hstmt.Close()
 	}
 
-	delLine, err := tx.PrepareContext(ctx,
-		`DELETE FROM tool_line WHERE tool_uid=? AND chrom=? AND pos=? AND ref=? AND alt=?`)
-	if err != nil {
-		return err
-	}
-	defer delLine.Close()
+	// No per-locus DELETE-before-insert: tool_line and tool_processed are committed
+	// together in this one transaction, so a "novel" locus (the only kind passed
+	// here — see runToolCached) cannot already have tool_line rows. The upsert keeps
+	// this idempotent (replace an existing line at the same ord) without the extra
+	// per-locus index probe that dominated the write at whole-genome scale.
 	insLine, err := tx.PrepareContext(ctx,
-		`INSERT INTO tool_line(tool_uid,chrom,pos,ref,alt,ord,line) VALUES(?,?,?,?,?,?,?)`)
+		`INSERT INTO tool_line(tool_uid,chrom,pos,ref,alt,ord,line) VALUES(?,?,?,?,?,?,?)
+		 ON CONFLICT(tool_uid,chrom,pos,ref,alt,ord) DO UPDATE SET line=excluded.line`)
 	if err != nil {
 		return err
 	}
 	defer insLine.Close()
 	for l, ls := range lines {
-		if _, err := delLine.ExecContext(ctx, toolUID, l.Chrom, l.Pos, l.Ref, l.Alt); err != nil {
-			return err
-		}
 		for i, line := range ls {
 			if _, err := insLine.ExecContext(ctx, toolUID, l.Chrom, l.Pos, l.Ref, l.Alt, i, line); err != nil {
 				return err

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/compgenlab/cganno/internal/model"
@@ -168,5 +169,131 @@ func TestToolOutputCache(t *testing.T) {
 	}
 	if len(got2) != 0 {
 		t.Errorf("want 0 lines at %s, got %d", none.Key(), len(got2))
+	}
+}
+
+// queryPlan returns the EXPLAIN QUERY PLAN detail text for q (bound to args).
+func queryPlan(t *testing.T, s *Store, q string, args ...any) string {
+	t.Helper()
+	rows, err := s.db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+q, args...)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var sb strings.Builder
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("scan plan: %v", err)
+		}
+		sb.WriteString(detail)
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
+
+// TestChunkQueriesUseIndex is the regression guard for the full-scan bug: the
+// chunked lookup queries must SEARCH via an index, never SCAN the whole table.
+// The bug was factoring the scoping column (assembly / tool_uid) OUTSIDE the OR
+// group, which made every disjunct non-indexable and forced a per-chunk full scan
+// — invisible on a small table, fatal once the cache held millions of rows.
+func TestChunkQueriesUseIndex(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	// Seed enough rows that a full scan would be a clearly-wrong plan choice.
+	var rows []model.AnnRow
+	lines := map[model.Locus][]string{}
+	var processed []model.Locus
+	for i := 0; i < 2000; i++ {
+		l := model.Locus{Chrom: "chr1", Pos: int64(i + 1), Ref: "A", Alt: "G"}
+		rows = append(rows, model.AnnRow{Locus: l, DataSource: "vep:1", Key: "gene", Value: model.Text("G")})
+		lines[l] = []string{"chr1\t1\tA\tG\tx"}
+		processed = append(processed, l)
+	}
+	if err := s.PutAnnotations(ctx, "GRCh38", rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutToolOutput(ctx, "vep:1", nil, lines, processed); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name, query string
+		args        []any
+	}{
+		{
+			"annotation",
+			`SELECT chrom,pos,ref,alt,data_source_id,key,value_text,value_num FROM annotation ` +
+				`WHERE (assembly=? AND chrom=? AND pos=? AND ref=? AND alt=?) OR (assembly=? AND chrom=? AND pos=? AND ref=? AND alt=?)`,
+			[]any{"GRCh38", "chr1", 1, "A", "G", "GRCh38", "chr1", 2, "A", "G"},
+		},
+		{
+			"tool_processed",
+			`SELECT chrom,pos,ref,alt FROM tool_processed ` +
+				`WHERE (tool_uid=? AND chrom=? AND pos=? AND ref=? AND alt=?) OR (tool_uid=? AND chrom=? AND pos=? AND ref=? AND alt=?)`,
+			[]any{"vep:1", "chr1", 1, "A", "G", "vep:1", "chr1", 2, "A", "G"},
+		},
+		{
+			"tool_line",
+			`SELECT chrom,pos,line FROM tool_line ` +
+				`WHERE (tool_uid=? AND chrom=? AND pos=?) OR (tool_uid=? AND chrom=? AND pos=?)`,
+			[]any{"vep:1", "chr1", 1, "vep:1", "chr1", 2},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			plan := queryPlan(t, s, c.query, c.args...)
+			if !strings.Contains(plan, "SEARCH") {
+				t.Errorf("plan should SEARCH via an index, got:\n%s", plan)
+			}
+			if strings.Contains(plan, "SCAN "+c.name) {
+				t.Errorf("plan full-scans %s (the bug), got:\n%s", c.name, plan)
+			}
+			// The decisive check: the index seek must be constrained by chrom (and
+			// pos), narrowing to the site — not just the scoping column. EXPLAIN lists
+			// only the columns the index actually resolves in the parenthetical, so
+			// "chrom=?" appearing there means the seek uses it.
+			if !strings.Contains(plan, "chrom=?") {
+				t.Errorf("index seek must narrow by chrom/pos, not just the scoping column; got:\n%s", plan)
+			}
+		})
+	}
+
+	// Prove the OLD shape (scoping column factored outside the OR) narrows by ONLY
+	// the scoping column: it seeks tool_uid=? then walks EVERY row for that uid per
+	// chunk (O(rows_for_uid) × chunks) — the real, non-hypothetical bug.
+	oldForm := `SELECT chrom,pos,line FROM tool_line WHERE tool_uid=? AND ((chrom=? AND pos=?) OR (chrom=? AND pos=?))`
+	plan := queryPlan(t, s, oldForm, "vep:1", "chr1", 1, "chr1", 2)
+	if strings.Contains(plan, "chrom=?") {
+		t.Errorf("expected the old shape's index seek to use tool_uid only (not chrom), got:\n%s", plan)
+	}
+}
+
+// TestPutToolOutputIdempotent verifies the upsert (no DELETE pass): re-writing the
+// same locus replaces its line at each ord rather than erroring on the PK or
+// leaving duplicate rows.
+func TestPutToolOutputIdempotent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	const uid = "vep:1"
+	l := model.Locus{Chrom: "chr1", Pos: 100, Ref: "A", Alt: "G"}
+
+	if err := s.PutToolOutput(ctx, uid, nil, map[model.Locus][]string{l: {"chr1\t100\tA\tG\told"}}, []model.Locus{l}); err != nil {
+		t.Fatalf("first put: %v", err)
+	}
+	// Re-write the same locus/ord with a new value — must not error, must replace.
+	if err := s.PutToolOutput(ctx, uid, nil, map[model.Locus][]string{l: {"chr1\t100\tA\tG\tnew"}}, []model.Locus{l}); err != nil {
+		t.Fatalf("second put: %v", err)
+	}
+	got, err := s.ToolLines(ctx, uid, []model.Locus{l})
+	if err != nil {
+		t.Fatalf("lines: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want exactly 1 line (replaced, not duplicated), got %d: %v", len(got), got)
+	}
+	if !strings.HasSuffix(got[0].Line, "new") {
+		t.Errorf("line not replaced: %q", got[0].Line)
 	}
 }
