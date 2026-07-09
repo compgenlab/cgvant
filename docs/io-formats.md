@@ -41,7 +41,7 @@ cganno annotate [--all | -a name,…] [--format tab|vcf|json|text] [-o FILE] <vc
 - **`--format`** selects the rendering; the default is **`tab`**.
 - **`-o FILE`** writes the output to a file (stdout if omitted) — for *any* format.
 - **`-v` / `--verbose`** prints progress to **stderr** (stdout still carries the results):
-  which phase is running (external tool, pipeline build, single-pass vs. an N-job fan-out),
+  which phase is running (external tool, pipeline build, single pass vs. a per-source fan-out),
   a running variant/record count, per-job completion during a parallel (`-t N`) run, and — on
   the individual-locus path — external-tool cache hits (how many loci are novel vs. cached).
   Off by default.
@@ -95,27 +95,18 @@ unrelated to a `tab` *source's* `ref_col`/`alt_col` (which describe how that sou
 
 ### Parallel VCF annotation (`-t`)
 
-For `--format vcf`, **`-t N`** (`--threads N`) annotates up to `N` sources at once. Each job
-runs a full pass over the input for **one source** (a multi-file source — per-chromosome, or a
-`files`/per-alt set — expands to **one job per file**, so those parallelize file-by-file) into a
-temporary `.vcf.gz`, then the parts are merged positionally back into `-o` (or stdout). `-t 0`
-uses all CPUs; `-t 1` (the default) is the plain single pass. `--keep-temp` retains the per-source
-temp parts for debugging. The builtins (incl. `vardist` and the sample-derived FORMAT builtins)
-run together in one part, so ordering-sensitive and per-sample builtins stay correct.
+For `--format vcf`, **`-t N`** (`--threads N`) annotates a large VCF in parallel by fanning the
+work out across annotation **sources** (one pass per source, merged positionally). To parallelize
+*within* a single huge source — or to scale across nodes — split the input into batches outside
+cganno and run one `cganno annotate` job per batch (scatter with `cgkit vcf-split`, gather with
+`cgkit vcf-concat`). See **[Parallel & distributed annotation](parallel.md)**.
 
 ```sh
-cganno annotate --format vcf -t 8 -o out.vcf.gz in.vcf.gz   # 8 sources at a time
+cganno annotate --all --format vcf -t 8 -o out.vcf.gz in.vcf.gz
 ```
 
-Because the parts hold the same sites in the same order, they can also be recombined by hand —
-useful for a distributed (per-source, e.g. HPC) fan-out — with the `vcf-merge` subcommand:
-
-```sh
-cganno vcf-merge -o out.vcf.gz part.A.vcf.gz part.B.vcf.gz …   # same-order INFO/FORMAT combine
-```
-
-`vcf-merge` is a *column* combine (identical sites, identical order — only INFO/FORMAT differ),
-**not** a bcftools-style site merge.
+The full story — strategy trade-offs, the `vardist` caveat, a worked SLURM array example, and the
+`concat` vs `vcf-merge` distinction — is in **[Parallel & distributed annotation](parallel.md)**.
 
 ---
 
