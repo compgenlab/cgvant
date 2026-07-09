@@ -24,9 +24,11 @@ database server to stand up.
 - **Memoizing cache.** Annotated loci are memoized in SQLite and served instantly
   thereafter; an external tool's output can be reused across runs (`--tool-cache-dir`)
   instead of re-running it.
-- **Scales to whole genomes.** Parallel per-source VCF annotation (`-t`), BGZF output,
-  and GTF gene models that are tabix-indexed and queried by position — so multiple large
-  gene models stay memory-bounded rather than loaded whole into RAM.
+- **Scales to whole genomes.** Parallel VCF annotation (`-t`) fans out across annotation
+  sources on one machine; to parallelize a few very large sources or scale across nodes, split
+  the input into batches outside cganno and run one job per batch (`cgkit vcf-split` /
+  `vcf-concat`, e.g. across a job array). BGZF output, and GTF gene models that are
+  tabix-indexed and queried by position stay memory-bounded rather than loaded whole into RAM.
 - **REST server.** `cganno server` runs the same engine behind an asynchronous HTTP job
   queue (submit a locus or an uploaded VCF → poll → fetch JSON results).
 
@@ -72,12 +74,17 @@ See the **[Quick start guide](docs/quickstart.md)** for a fuller walkthrough, an
 
 Full documentation lives in **[`docs/`](docs/README.md)**:
 
+- **[Getting started](docs/quickstart.md)** — install, initialize, add a source, annotate.
 - **[Overview](docs/overview.md)** — the config model, snapshots, and the cache.
+- **[Annotation pathways](docs/pathways.md)** — the VCF pipeline vs. the individual-locus/cache
+  path: what each computes, samples, tools, caching.
 - **[Source types](docs/sources.md)** — builtin / vcf / tabix / bed / gtf / tool.
 - **[Source & tool lifecycle](docs/lifecycle.md)** — download, build recipes, tool
   image-acquire + setup, and per-run pre/post-processing steps.
 - **[Input & output formats](docs/io-formats.md)** — how variants go in and how results
   come out.
+- **[Parallel & distributed annotation](docs/parallel.md)** — `-t N` source fan-out on one
+  machine, and a `cgkit vcf-split` → array → `cgkit vcf-concat` job array across a scheduler.
 - **[Registry](docs/registry.md)** — pulling pre-made sources, and submitting your own.
 - **[REST API](docs/rest-api.md)** — the async annotate server (`cganno server`).
 

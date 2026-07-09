@@ -8,9 +8,11 @@ This directory documents how the system is put together and how to use it.
 
 ## Contents
 
-- **[Quick start](quickstart.md)** — install, initialize, add a source, download, annotate.
+- **[Getting started](quickstart.md)** — install, initialize, add a source, download, annotate.
 - **[Overview](overview.md)** — the config model (config.toml, `annotations_dir`,
   snapshots, sources, annotations) and the annotation cache.
+- **[Annotation pathways](pathways.md)** — the two paths `annotate` runs (the VCF streaming
+  pipeline vs. the individual-locus/cache path): what each can compute, samples, tools, caching.
 - **[Source types](sources.md)** — the one `source` concept and its `type`s:
   `builtin`, and data files in `vcf` / `tab` (tabix) / `bed` / `gtf` format, and
   `tool` (an external per-query annotator). What each does and how its annotations
@@ -22,6 +24,9 @@ This directory documents how the system is put together and how to use it.
 - **[Input & output formats](io-formats.md)** — how variants are handed *in* (loci or
   a VCF; a tool's `input_format`) and how results come *out* (`cganno annotate
   --format tab|vcf|json|text`; a tool's output `format`).
+- **[Parallel & distributed annotation](parallel.md)** — annotating large VCFs in parallel:
+  the `-t N` source fan-out, and a job-array scatter/gather (`cgkit vcf-split` →
+  annotate array → `cgkit vcf-concat`) for a scheduler.
 - **[Registry](registry.md)** — using a registry to pull pre-made sources/snapshots,
   and submitting a source (data or tool) to the public registry.
 - **[REST API](rest-api.md)** — *placeholder* for the planned annotation endpoint.

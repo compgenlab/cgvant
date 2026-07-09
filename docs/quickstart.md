@@ -65,12 +65,23 @@ cganno annotate -a clinvar_sig,gnomad_af --format json -o hits.json in.vcf
 
 Which annotations apply is chosen by `--all`, `-a name[,name…]`, or (with neither) the
 snapshot's `default_annotations`. Output is `tab` by default; see the other
-**[output formats](io-formats.md#annotate-output)** (`vcf` / `json` / `text`).
+**[output formats](io-formats.md#annotate-output)** (`vcf` / `json` / `text`). The two formats
+take different internal paths — see **[Annotation pathways](pathways.md)**.
+
+For a large cohort VCF, annotate in parallel with `-t N` (and, on a scheduler, a job array):
+
+```sh
+cganno annotate --all --format vcf -t 8 -o out.vcf.gz in.vcf.gz
+```
+
+See **[Parallel & distributed annotation](parallel.md)**.
 
 ## Next steps
 
 - **[Overview](overview.md)** — config model, snapshots, the cache.
+- **[Annotation pathways](pathways.md)** — the VCF pipeline vs. the locus/cache path.
 - **[Source types](sources.md)** — builtin / vcf / tabix / bed / gtf / tool.
 - **[Lifecycle](lifecycle.md)** — download, build recipes, tool setup + steps.
 - **[Input & output formats](io-formats.md)** — `input_format`, `--format`.
+- **[Parallel & distributed annotation](parallel.md)** — `-t N` source fan-out, and job arrays.
 - **[Registry](registry.md)** — pulling and submitting sources.
