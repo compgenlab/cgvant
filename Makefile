@@ -5,7 +5,7 @@
 
 BIN     := cganno
 PKG     := ./cmd/cganno
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION := $(shell v=$$(git describe --tags --always 2>/dev/null || echo dev); if ! git diff --quiet HEAD 2>/dev/null; then v=$$(echo "$$v" | sed 's/-g/-dev-g/'); echo "$$v" | grep -q -- -dev || v="$$v-dev"; fi; echo "$$v")
 LDFLAGS := -s -w -X main.version=$(VERSION)
 GO      := GOWORK=off CGO_ENABLED=0 go
 
@@ -13,8 +13,17 @@ GO      := GOWORK=off CGO_ENABLED=0 go
 # (see the separate `dist-windows` target).
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.DEFAULT_GOAL := build
-.PHONY: build test vet fmt tidy clean install cross cross-bin dist dist-windows help $(PLATFORMS)
+.DEFAULT_GOAL := all
+.PHONY: all build test vet fmt tidy clean install cross cross-bin dist dist-windows help $(PLATFORMS)
+
+## all: build binaries for all platforms (linux,darwin x amd64,arm64) into bin/
+all:
+	@for p in $(PLATFORMS); do \
+		os=$${p%/*}; arch=$${p#*/}; \
+		echo "building $(BIN).$${os}_$${arch}"; \
+		GOWORK=off CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
+			go build -ldflags '$(LDFLAGS)' -o bin/$(BIN).$${os}_$${arch} $(PKG); \
+	done
 
 ## build: compile for the host platform into bin/
 build:
