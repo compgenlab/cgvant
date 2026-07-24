@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,7 +17,7 @@ func TestWaitForReturnsOnDone(t *testing.T) {
 	q.StartWorkers(ctx, 1, func(_ context.Context, _ Job, _ []byte) ([]byte, int, error) {
 		return []byte("[]"), 1, nil
 	})
-	id, _ := q.Enqueue(ctx, KindLocus, "s", "", "ip", []byte("x"))
+	id, _ := q.Enqueue(ctx, NewJob{Kind: KindLocus, Snapshot: "s", ClientIP: "ip", Body: []byte("x")})
 	job, ok, err := q.WaitFor(ctx, id, 2*time.Second)
 	if err != nil || !ok {
 		t.Fatalf("WaitFor ok=%v err=%v", ok, err)
@@ -28,7 +29,7 @@ func TestWaitForReturnsOnDone(t *testing.T) {
 
 func TestWaitForTimeoutReturnsCurrent(t *testing.T) {
 	q := openTestQueue(t) // no workers → job stays queued
-	id, _ := q.Enqueue(context.Background(), KindLocus, "s", "", "ip", []byte("x"))
+	id, _ := q.Enqueue(context.Background(), NewJob{Kind: KindLocus, Snapshot: "s", ClientIP: "ip", Body: []byte("x")})
 	start := time.Now()
 	job, ok, err := q.WaitFor(context.Background(), id, 200*time.Millisecond)
 	if err != nil || !ok {
@@ -121,9 +122,9 @@ func TestQueueListAndGC(t *testing.T) {
 	ctx := context.Background()
 
 	// Two terminal (done) jobs and one still-queued job.
-	oldID, _ := q.Enqueue(ctx, KindLocus, "s", "", "1.1.1.1", []byte("a"))
-	newID, _ := q.Enqueue(ctx, KindLocus, "s", "", "2.2.2.2", []byte("b"))
-	queuedID, _ := q.Enqueue(ctx, KindLocus, "s", "", "3.3.3.3", []byte("c"))
+	oldID, _ := q.Enqueue(ctx, NewJob{Kind: KindLocus, Snapshot: "s", ClientIP: "1.1.1.1", Body: []byte("a")})
+	newID, _ := q.Enqueue(ctx, NewJob{Kind: KindLocus, Snapshot: "s", ClientIP: "2.2.2.2", Body: []byte("b")})
+	queuedID, _ := q.Enqueue(ctx, NewJob{Kind: KindLocus, Snapshot: "s", ClientIP: "3.3.3.3", Body: []byte("c")})
 	// Mark the first two finished at t=10 and t=100.
 	if _, err := q.db.Exec(`UPDATE job SET status=?, finished_at=? WHERE id=?`, StatusDone, 10, oldID); err != nil {
 		t.Fatal(err)
@@ -133,14 +134,14 @@ func TestQueueListAndGC(t *testing.T) {
 	}
 
 	// List by status.
-	done, err := q.List(ctx, StatusDone, 50, 0)
+	done, err := q.List(ctx, JobFilter{Status: StatusDone}, 50, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(done) != 2 {
 		t.Fatalf("List(done) = %d jobs, want 2", len(done))
 	}
-	if q, _ := q.List(ctx, StatusQueued, 50, 0); len(q) != 1 {
+	if q, _ := q.List(ctx, JobFilter{Status: StatusQueued}, 50, 0); len(q) != 1 {
 		t.Fatalf("List(queued) = %d, want 1", len(q))
 	}
 
@@ -180,10 +181,10 @@ func TestFairClaimRoundRobin(t *testing.T) {
 
 	// IP A enqueues 3 jobs before IP B enqueues 3.
 	for i := 0; i < 3; i++ {
-		q.Enqueue(ctx, KindLocus, "s", "", "10.0.0.1", []byte("a"))
+		q.Enqueue(ctx, NewJob{Kind: KindLocus, Snapshot: "s", ClientIP: "10.0.0.1", Body: []byte("a")})
 	}
 	for i := 0; i < 3; i++ {
-		q.Enqueue(ctx, KindLocus, "s", "", "10.0.0.2", []byte("b"))
+		q.Enqueue(ctx, NewJob{Kind: KindLocus, Snapshot: "s", ClientIP: "10.0.0.2", Body: []byte("b")})
 	}
 
 	// Claim (without completing) — jobs stay running, deprioritizing the busier IP.
@@ -218,10 +219,10 @@ func TestFairClaimPerIPCap(t *testing.T) {
 	ctx := context.Background()
 
 	// Two IPs, two jobs each; cap of 1 running per IP.
-	q.Enqueue(ctx, KindLocus, "s", "", "10.0.0.1", []byte("a"))
-	q.Enqueue(ctx, KindLocus, "s", "", "10.0.0.1", []byte("a"))
-	q.Enqueue(ctx, KindLocus, "s", "", "10.0.0.2", []byte("b"))
-	q.Enqueue(ctx, KindLocus, "s", "", "10.0.0.2", []byte("b"))
+	q.Enqueue(ctx, NewJob{Kind: KindLocus, Snapshot: "s", ClientIP: "10.0.0.1", Body: []byte("a")})
+	q.Enqueue(ctx, NewJob{Kind: KindLocus, Snapshot: "s", ClientIP: "10.0.0.1", Body: []byte("a")})
+	q.Enqueue(ctx, NewJob{Kind: KindLocus, Snapshot: "s", ClientIP: "10.0.0.2", Body: []byte("b")})
+	q.Enqueue(ctx, NewJob{Kind: KindLocus, Snapshot: "s", ClientIP: "10.0.0.2", Body: []byte("b")})
 
 	// First two claims: one per IP. Third: both IPs at cap → nothing claimable.
 	if _, _, ok, _ := q.claimNext(ctx); !ok {
@@ -264,6 +265,69 @@ func TestOpsEndpoints(t *testing.T) {
 	s.routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("/v1/jobs with token = %d, want 200", rec.Code)
+	}
+}
+
+func TestListScopedBySession(t *testing.T) {
+	q, err := OpenQueue(context.Background(), filepath.Join(t.TempDir(), "q.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close() })
+	q.nowFn = monotonicNow()
+	ctx := context.Background()
+
+	// Two sessions submit jobs.
+	q.Enqueue(ctx, NewJob{Kind: KindLocus, Snapshot: "s", Session: "alice", Label: "chr1:1:A:G", Body: []byte("x")})
+	q.Enqueue(ctx, NewJob{Kind: KindLocus, Snapshot: "s", Session: "alice", Label: "chr2:2:C:T", Body: []byte("y")})
+	q.Enqueue(ctx, NewJob{Kind: KindLocus, Snapshot: "s", Session: "bob", Label: "chr3:3:G:A", Body: []byte("z")})
+
+	alice, err := q.List(ctx, JobFilter{Session: "alice"}, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alice) != 2 {
+		t.Fatalf("alice sees %d jobs, want 2 (only her own)", len(alice))
+	}
+	for _, j := range alice {
+		if j.Session != "alice" {
+			t.Errorf("alice's list leaked session %q", j.Session)
+		}
+		if j.Label == "" {
+			t.Errorf("job %s missing label for history display", j.ID)
+		}
+	}
+	if all, _ := q.List(ctx, JobFilter{}, 50, 0); len(all) != 3 {
+		t.Errorf("unscoped list = %d, want 3 (admin sees all)", len(all))
+	}
+}
+
+func TestUIListScopedByCookie(t *testing.T) {
+	s := testServer(t)
+	// Two jobs on session "s1", one on "s2".
+	s.queue.Enqueue(context.Background(), NewJob{Kind: KindLocus, Snapshot: s.snap.Name, Session: "s1", Body: []byte("a")})
+	s.queue.Enqueue(context.Background(), NewJob{Kind: KindLocus, Snapshot: s.snap.Name, Session: "s1", Body: []byte("b")})
+	s.queue.Enqueue(context.Background(), NewJob{Kind: KindLocus, Snapshot: s.snap.Name, Session: "s2", Body: []byte("c")})
+
+	req := httptest.NewRequest("GET", "/ui/jobs", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "s1"})
+	rec := httptest.NewRecorder()
+	s.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var resp struct {
+		Jobs   []Job `json:"jobs"`
+		Scoped bool  `json:"scoped"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Scoped {
+		t.Errorf("unauthenticated /ui/jobs should be scoped")
+	}
+	if len(resp.Jobs) != 2 {
+		t.Errorf("session s1 sees %d jobs, want 2 (not s2's)", len(resp.Jobs))
 	}
 }
 

@@ -38,14 +38,27 @@ type Job struct {
 	Error      string `json:"error,omitempty"`
 	NVariants  int64  `json:"n_variants"`
 	ClientIP   string `json:"client_ip,omitempty"`
+	Session    string `json:"session,omitempty"` // the submitter's session id (browser cookie), for scoping history
+	Label      string `json:"label,omitempty"`   // short human label for history lists (the locus, or the VCF filename)
 	CreatedAt  int64  `json:"created_at"`
 	StartedAt  int64  `json:"started_at,omitempty"`
 	FinishedAt int64  `json:"finished_at,omitempty"`
 }
 
+// NewJob is the metadata for enqueuing a job (plus its input body).
+type NewJob struct {
+	Kind      string
+	Snapshot  string
+	Selection string
+	ClientIP  string
+	Session   string
+	Label     string
+	Body      []byte
+}
+
 // jobCols is the SELECT column list backing scanJob (kept in one place so every
 // query stays in sync with the scan order).
-const jobCols = `id,kind,snapshot,selection,status,error,n_variants,client_ip,created_at,started_at,finished_at`
+const jobCols = `id,kind,snapshot,selection,status,error,n_variants,client_ip,session_id,label,created_at,started_at,finished_at`
 
 // prefixCols qualifies each jobCols column with a table alias (for joins), e.g.
 // prefixCols("j") → "j.id,j.kind,…". The scan order is unchanged.
@@ -88,6 +101,8 @@ CREATE TABLE IF NOT EXISTS job (
   error       TEXT,
   n_variants  INTEGER,
   client_ip   TEXT    NOT NULL DEFAULT '',
+  session_id  TEXT    NOT NULL DEFAULT '',
+  label       TEXT    NOT NULL DEFAULT '',
   created_at  INTEGER NOT NULL,
   started_at  INTEGER,
   finished_at INTEGER
@@ -123,6 +138,24 @@ func OpenQueue(ctx context.Context, path string) (*Queue, error) {
 		db.Close()
 		return nil, fmt.Errorf("init server db schema: %w", err)
 	}
+	// Migrate older job DBs: add columns introduced after the table existed. This
+	// must precede any index that references those columns (e.g. job_session below).
+	for _, col := range []string{
+		"client_ip TEXT NOT NULL DEFAULT ''",
+		"session_id TEXT NOT NULL DEFAULT ''",
+		"label TEXT NOT NULL DEFAULT ''",
+	} {
+		if _, err := db.ExecContext(ctx, "ALTER TABLE job ADD COLUMN "+col); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			return nil, fmt.Errorf("migrate job table (%s): %w", col, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS job_session ON job(session_id, created_at)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create job_session index: %w", err)
+	}
 	// Crash recovery: requeue anything left mid-flight.
 	if _, err := db.ExecContext(ctx,
 		`UPDATE job SET status=?, started_at=NULL WHERE status=?`, StatusQueued, StatusRunning); err != nil {
@@ -145,7 +178,7 @@ func newID() (string, error) {
 }
 
 // Enqueue records a new queued job (metadata + input body) and wakes a worker.
-func (q *Queue) Enqueue(ctx context.Context, kind, snapshot, selection, clientIP string, body []byte) (string, error) {
+func (q *Queue) Enqueue(ctx context.Context, j NewJob) (string, error) {
 	id, err := newID()
 	if err != nil {
 		return "", err
@@ -156,19 +189,20 @@ func (q *Queue) Enqueue(ctx context.Context, kind, snapshot, selection, clientIP
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO job(id,kind,snapshot,selection,status,client_ip,created_at) VALUES(?,?,?,?,?,?,?)`,
-		id, kind, snapshot, selection, StatusQueued, clientIP, q.nowFn()); err != nil {
+		`INSERT INTO job(id,kind,snapshot,selection,status,client_ip,session_id,label,created_at)
+		 VALUES(?,?,?,?,?,?,?,?,?)`,
+		id, j.Kind, j.Snapshot, j.Selection, StatusQueued, j.ClientIP, j.Session, j.Label, q.nowFn()); err != nil {
 		return "", err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO job_input(job_id,body) VALUES(?,?)`, id, body); err != nil {
+		`INSERT INTO job_input(job_id,body) VALUES(?,?)`, id, j.Body); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
-	log.Printf("cganno server: job %s queued (kind=%s, ip=%s, selection=%q, %d bytes)",
-		id, kind, clientIP, selection, len(body))
+	log.Printf("cganno server: job %s queued (kind=%s, ip=%s, session=%s, selection=%q, %d bytes)",
+		id, j.Kind, j.ClientIP, j.Session, j.Selection, len(j.Body))
 	q.poke()
 	return id, nil
 }
@@ -245,41 +279,59 @@ type rowScanner interface{ Scan(dest ...any) error }
 
 func scanJob(row rowScanner) (Job, error) {
 	var j Job
-	var errStr, clientIP sql.NullString
+	var errStr, clientIP, session, label sql.NullString
 	var nVar, started, finished sql.NullInt64
 	if err := row.Scan(&j.ID, &j.Kind, &j.Snapshot, &j.Selection, &j.Status,
-		&errStr, &nVar, &clientIP, &j.CreatedAt, &started, &finished); err != nil {
+		&errStr, &nVar, &clientIP, &session, &label, &j.CreatedAt, &started, &finished); err != nil {
 		return Job{}, err
 	}
 	j.Error = errStr.String
 	j.NVariants = nVar.Int64
 	j.ClientIP = clientIP.String
+	j.Session = session.String
+	j.Label = label.String
 	j.StartedAt = started.Int64
 	j.FinishedAt = finished.Int64
 	return j, nil
 }
 
-// List returns jobs newest-first, optionally filtered by status, with limit/offset
-// paging. A blank status returns all statuses.
-func (q *Queue) List(ctx context.Context, status string, limit, offset int) ([]Job, error) {
+// JobFilter narrows a List query. Empty fields are not constrained.
+type JobFilter struct {
+	Status   string // queued|running|done|error
+	Session  string // scope to one submitter's session id
+	ClientIP string // scope to one client IP
+}
+
+// List returns jobs newest-first matching the filter, with limit/offset paging.
+func (q *Queue) List(ctx context.Context, f JobFilter, limit, offset int) ([]Job, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if status == "" {
-		rows, err = q.db.QueryContext(ctx,
-			`SELECT `+jobCols+` FROM job ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, limit, offset)
-	} else {
-		rows, err = q.db.QueryContext(ctx,
-			`SELECT `+jobCols+` FROM job WHERE status=? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
-			status, limit, offset)
+	var where []string
+	var args []any
+	if f.Status != "" {
+		where = append(where, "status=?")
+		args = append(args, f.Status)
 	}
+	if f.Session != "" {
+		where = append(where, "session_id=?")
+		args = append(args, f.Session)
+	}
+	if f.ClientIP != "" {
+		where = append(where, "client_ip=?")
+		args = append(args, f.ClientIP)
+	}
+	query := `SELECT ` + jobCols + ` FROM job`
+	if len(where) > 0 {
+		query += ` WHERE ` + strings.Join(where, " AND ")
+	}
+	query += ` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+
+	rows, err := q.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

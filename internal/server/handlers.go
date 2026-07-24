@@ -187,7 +187,7 @@ func (s *Server) handleAnnotateLocus(w http.ResponseWriter, r *http.Request) {
 	if !s.toolGateOK(w, r, selection) {
 		return
 	}
-	s.enqueue(w, r, KindLocus, selection, []byte(req.Locus))
+	s.enqueue(w, r, KindLocus, selection, req.Locus, []byte(req.Locus))
 }
 
 // handleAnnotateVCF serves POST /v1/annotate/vcf: a multipart VCF upload (field
@@ -198,7 +198,7 @@ func (s *Server) handleAnnotateVCF(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
 		return
 	}
-	file, _, err := r.FormFile("vcf")
+	file, header, err := r.FormFile("vcf")
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "missing \"vcf\" file field")
 		return
@@ -231,7 +231,40 @@ func (s *Server) handleAnnotateVCF(w http.ResponseWriter, r *http.Request) {
 	if !s.toolGateOK(w, r, selection) {
 		return
 	}
-	s.enqueue(w, r, KindVCF, selection, body)
+	label := "VCF upload"
+	if header != nil && header.Filename != "" {
+		label = header.Filename
+	}
+	s.enqueue(w, r, KindVCF, selection, label, body)
+}
+
+const sessionCookie = "cganno_session"
+
+// sessionID returns the requester's session id from its cookie (browser) or the
+// X-Cganno-Session header (API clients), or "" when there is none.
+func (s *Server) sessionID(r *http.Request) string {
+	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
+		return c.Value
+	}
+	return strings.TrimSpace(r.Header.Get("X-Cganno-Session"))
+}
+
+// ensureSession returns the requester's session id, minting one (Set-Cookie) if
+// absent so a browser gets a stable id to scope its request history by. Must be
+// called before the response body is written.
+func (s *Server) ensureSession(w http.ResponseWriter, r *http.Request) string {
+	if id := s.sessionID(r); id != "" {
+		return id
+	}
+	id, err := newID()
+	if err != nil {
+		return ""
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: id, Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 90 * 24 * 3600,
+	})
+	return id
 }
 
 // authed reports whether the request carries a valid bearer token (used to relax
@@ -296,9 +329,13 @@ func (s *Server) validateSelection(w http.ResponseWriter, selection string) bool
 // scheduling). With a ?wait= (capped by submit_wait), it blocks up to that long for
 // the job to finish and returns the results inline — so fast jobs come back done in
 // one round trip. Otherwise it writes the async 202 { job_id } response as before.
-func (s *Server) enqueue(w http.ResponseWriter, r *http.Request, kind, selection string, body []byte) {
+func (s *Server) enqueue(w http.ResponseWriter, r *http.Request, kind, selection, label string, body []byte) {
 	ip := clientIP(r, s.trusted)
-	id, err := s.queue.Enqueue(r.Context(), kind, s.snap.Name, selection, ip, body)
+	session := s.ensureSession(w, r) // tags the job so the submitter can browse it later
+	id, err := s.queue.Enqueue(r.Context(), NewJob{
+		Kind: kind, Snapshot: s.snap.Name, Selection: selection,
+		ClientIP: ip, Session: session, Label: label, Body: body,
+	})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "enqueue: "+err.Error())
 		return
@@ -389,7 +426,10 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListJobs lists jobs (newest first) with optional ?status= and ?limit/?offset
-// paging. It serves both /v1/jobs (authenticated) and /ui/jobs.
+// paging. It serves both /v1/jobs and /ui/jobs. Listing is scoped to the requester's
+// own history (by session cookie, else client IP) UNLESS the request is
+// authenticated with a token — an admin then sees every job. This keeps one user
+// from browsing another's requests on an open public server.
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	switch status {
@@ -403,7 +443,17 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		limit = 500
 	}
 	offset := atoiDefault(r.URL.Query().Get("offset"), 0)
-	jobs, err := s.queue.List(r.Context(), status, limit, offset)
+
+	f := JobFilter{Status: status}
+	scoped := !s.authed(r)
+	if scoped {
+		if sess := s.sessionID(r); sess != "" {
+			f.Session = sess
+		} else {
+			f.ClientIP = clientIP(r, s.trusted)
+		}
+	}
+	jobs, err := s.queue.List(r.Context(), f, limit, offset)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -411,7 +461,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	if jobs == nil {
 		jobs = []Job{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs, "limit": limit, "offset": offset})
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs, "limit": limit, "offset": offset, "scoped": scoped})
 }
 
 // atoiDefault parses s as an int, falling back to def on empty/invalid input.

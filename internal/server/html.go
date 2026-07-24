@@ -9,6 +9,7 @@ import "net/http"
 // JS that submits a job, polls its status, renders the result as a table, and
 // offers JSON/CSV/TSV downloads. Batch and VCF modes post to /ui/submit/vcf.
 func (s *Server) handleForm(w http.ResponseWriter, r *http.Request) {
+	s.ensureSession(w, r) // give the browser a session id so it can list its history
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(formHTML))
 }
@@ -87,6 +88,12 @@ const formHTML = `<!doctype html>
   <button type="button" id="dl-tsv">Download TSV</button>
 </div>
 <div id="results"></div>
+
+<h2 style="font-size:1.05rem; margin-top:2.5rem;">Recent requests
+  <button type="button" id="hist-refresh" style="font-size:0.75rem; padding:0.1rem 0.4rem; margin-left:0.5rem;">refresh</button>
+</h2>
+<p class="hint">Your prior submissions from this browser session. Click a completed one to view its results again.</p>
+<div id="history">loading…</div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -188,15 +195,73 @@ async function poll(jobId) {
       $('status').textContent = 'Done (' + job.n_variants + ' variant(s)).';
       const rr = await fetch('/ui/jobs/' + jobId + '/results');
       renderTable(await rr.json());
+      loadHistory();
       return;
     }
     if (job.status === 'error') {
       $('status').innerHTML = '<span class="err">Job failed: ' + (job.error || 'unknown error') + '</span>';
+      loadHistory();
       return;
     }
     $('status').textContent = 'Status: ' + job.status + '…';
     await new Promise(res => setTimeout(res, 500));
   }
+}
+
+// --- request history (scoped to this browser's session) --------------------
+
+function fmtTime(sec) {
+  if (!sec) return '';
+  return new Date(sec * 1000).toLocaleString();
+}
+
+async function loadHistory() {
+  const box = $('history');
+  try {
+    const r = await fetch('/ui/jobs?limit=25');
+    const data = await r.json();
+    const jobs = data.jobs || [];
+    if (!jobs.length) { box.innerHTML = '<p class="hint">No requests yet.</p>'; return; }
+    const table = document.createElement('table');
+    table.innerHTML = '<tr><th>when</th><th>request</th><th>kind</th><th>status</th><th>variants</th><th></th></tr>';
+    for (const j of jobs) {
+      const tr = document.createElement('tr');
+      const td = (txt) => { const c = document.createElement('td'); c.textContent = txt; return c; };
+      tr.appendChild(td(fmtTime(j.created_at)));
+      tr.appendChild(td(j.label || ''));
+      tr.appendChild(td(j.kind));
+      tr.appendChild(td(j.status));
+      tr.appendChild(td(j.status === 'done' ? String(j.n_variants) : ''));
+      const act = document.createElement('td');
+      if (j.status === 'done') {
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = 'view';
+        b.addEventListener('click', () => viewJob(j.job_id));
+        act.appendChild(b);
+      } else if (j.status === 'error') {
+        act.textContent = '⚠'; act.title = j.error || 'failed';
+      }
+      tr.appendChild(act);
+      table.appendChild(tr);
+    }
+    box.innerHTML = '';
+    box.appendChild(table);
+  } catch (e) {
+    box.innerHTML = '<p class="err">could not load history</p>';
+  }
+}
+
+async function viewJob(id) {
+  $('status').textContent = 'Loading results for job ' + id + '…';
+  const r = await fetch('/ui/jobs/' + id + '/results');
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    $('status').innerHTML = '<span class="err">' + (d.error || 'could not load results') + '</span>';
+    return;
+  }
+  $('status').textContent = '';
+  renderTable(await r.json());
+  $('results').scrollIntoView({ behavior: 'smooth' });
 }
 
 // Submit the current mode's input, returning the parsed response (or throwing).
@@ -285,10 +350,12 @@ $('form').addEventListener('submit', async (e) => {
     if (data.status === 'done' && data.results) {
       $('status').textContent = 'Done (' + (data.n_variants || data.results.length) + ' variant(s)).';
       renderTable(data.results);
+      loadHistory();
       return;
     }
     if (data.status === 'error') {
       $('status').innerHTML = '<span class="err">Job failed: ' + (data.error || 'unknown error') + '</span>';
+      loadHistory();
       return;
     }
     // Slow path: still running after the buffer — fall back to polling.
@@ -298,8 +365,11 @@ $('form').addEventListener('submit', async (e) => {
   }
 });
 
+$('hist-refresh').addEventListener('click', loadHistory);
+
 showMode();
 loadAnnotations();
+loadHistory();
 </script>
 </body>
 </html>

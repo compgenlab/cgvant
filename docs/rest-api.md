@@ -93,12 +93,20 @@ should be authenticated.
 | `GET /v1/annotations` | — | the snapshot's sources + annotation fields, with the default set marked (for discovery/selection) |
 | `POST /v1/annotate` | `{ "locus": "chrom:pos:ref:alt", "annotations": "all"｜["a",…] }`; optional `?wait=<sec>` | `202 { "job_id" }`, or `200 { "job_id", "status":"done", "n_variants", "results":[…] }` if it finishes within `wait` |
 | `POST /v1/annotate/vcf` | `multipart/form-data`: file field `vcf`, optional `annotations` form field; optional `?wait=<sec>` | `202 { "job_id" }` (or inline results, as above) |
-| `GET /v1/jobs` | `?status=&limit=&offset=` (all optional) | `{ "jobs": [ … ], "limit": N, "offset": M }`, newest first |
+| `GET /v1/jobs` | `?status=&limit=&offset=` (all optional) | `{ "jobs": [ … ], "limit": N, "offset": M, "scoped": bool }`, newest first |
 | `GET /v1/jobs/{id}` | — | job status object |
 | `GET /v1/jobs/{id}/results` | — | the results array (see below), or `409` if not finished |
 
 Open (no token): `GET /healthz` → `{"status":"ok","snapshot":"…","assembly":"…"}` (for proxy health
 checks) and `GET /version` → `{"version":"…"}`.
+
+**Browsing your requests.** `GET /v1/jobs` (and `/ui/jobs`) lists jobs newest-first, but is
+**scoped to the requester** so one user can't browse another's history on an open server:
+unauthenticated requests see only their own jobs — by **session** (the `cganno_session` cookie the
+browser gets on first load, or an `X-Cganno-Session: <id>` header an API client sends), falling
+back to the client IP when there is no session. An **authenticated** request (valid bearer token)
+is treated as an admin and sees **all** jobs; the `scoped` field in the response says which applies.
+Each job carries a `label` (the locus, or the uploaded VCF's filename) for display.
 
 Submitting more than the configured per-IP rate returns `429`. On a public server, unauthenticated
 requests that select a `type="tool"` annotation are rejected with `403` unless `allow_tools_unauth`
@@ -136,7 +144,9 @@ split into one object per allele, each carrying its own `chrom/pos/ref/alt`.
   **batch** of loci (one per line), or a **VCF file** upload. Tick the annotations to return
   (fetched from `/ui/annotations`, defaults pre-checked; select-all/none buttons), submit. Its
   JavaScript posts the job, polls its status, renders the result as a table, and offers
-  **JSON / CSV / TSV** downloads. Batch and VCF modes post to `/ui/submit/vcf` (batch synthesizes
+  **JSON / CSV / TSV** downloads. A **Recent requests** panel lists this browser session's prior
+  submissions (scoped by the `cganno_session` cookie) — click a completed one to re-view its
+  results. Batch and VCF modes post to `/ui/submit/vcf` (batch synthesizes
   a sites-only VCF client-side). Disabled entirely when `ui_enabled = false`.
 - `GET /ui/annotations`, `POST /ui/submit`, `POST /ui/submit/vcf`, `GET /ui/jobs`,
   `GET /ui/jobs/{id}`, `GET /ui/jobs/{id}/results` — unauthenticated twins of the `/v1` endpoints
