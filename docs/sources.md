@@ -197,3 +197,50 @@ A tool source runs only when a **selected annotation** references it, so an unus
 For how a tool receives variants and how its output is read, see
 **[Input & output formats](io-formats.md)**. For the run/setup mechanics, see
 **[lifecycle](lifecycle.md)**.
+
+## Gene-list sources (`type = "genelist"`)
+
+A gene-list source **flags a variant when the gene overlapping it is in a named list**,
+using a GTF gene model already in the snapshot to resolve the variant → gene. For example, a
+"germline cancer genes" list flags any variant landing in `BRCA1`, `TP53`, ….
+
+```toml
+[[sources]]
+type    = "genelist"
+name    = "germline_cancer_genes"
+version = "1"
+gtf     = "gencode:48"            # a gtf source in this snapshot ("name" or "name:version")
+genes   = ["BRCA1", "BRCA2", "TP53"]   # inline, and/or:
+# genes_file = "germline_cancer_genes.txt"   # one symbol per line (# comments ok);
+                                             # resolved next to this fragment
+# gene_field = "gene_name"        # match gene_name (default) or gene_id
+
+  [[sources.annotations]]
+  name        = "germline_cancer_gene"   # type defaults to "flag"
+  description = "Variant in a germline cancer gene"
+```
+
+The referenced GTF is queried once per variant (its bgzip+tabix index is built by `cganno
+download`, same as any GTF source). The annotation is a **flag**: present when the variant's
+gene is in the set (matched case-insensitively), absent otherwise. You can define several
+gene-list sources over the same GTF (e.g. germline cancer, actionable, drug-target).
+
+## Non-commercial / licensing metadata
+
+Any source may declare licensing metadata. It is **informational only — nothing is blocked**;
+it just makes restrictions visible so users don't unknowingly obtain data they aren't entitled
+to use commercially.
+
+```toml
+[[sources]]
+name           = "cadd"
+version        = "1.7"
+# …
+non_commercial = true                                   # restricted to non-commercial use
+license        = "CADD non-commercial"
+license_url    = "https://cadd.gs.washington.edu/download"
+```
+
+`non_commercial` is surfaced by `cganno registry list` (a `[non-commercial]` marker), printed
+as a notice by `cganno download`, and returned in the REST server's `GET /v1/annotations`
+discovery (`"non_commercial": true`) so a public service can show it to users.

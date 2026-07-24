@@ -43,7 +43,11 @@ func cmdRegistry(ctx context.Context, cfgPath string, args []string) error {
 			}
 			fmt.Println("sources:") // includes type="tool" sources
 			for _, e := range m.Sources {
-				fmt.Printf("  %-16s %-10s %-18s %s\n", e.Name, e.Version, e.Assembly, e.Description)
+				desc := e.Description
+				if e.NonCommercial {
+					desc += "  [non-commercial]"
+				}
+				fmt.Printf("  %-16s %-10s %-18s %s\n", e.Name, e.Version, e.Assembly, desc)
 			}
 		}
 		return nil

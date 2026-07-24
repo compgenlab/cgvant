@@ -27,10 +27,12 @@ type annotationInfo struct {
 }
 
 type sourceInfo struct {
-	Name        string           `json:"name"`
-	Version     string           `json:"version,omitempty"`
-	Type        string           `json:"type"` // "data" | "builtin" | "tool"
-	Annotations []annotationInfo `json:"annotations"`
+	Name          string           `json:"name"`
+	Version       string           `json:"version,omitempty"`
+	Type          string           `json:"type"` // "data" | "builtin" | "tool" | "genelist"
+	NonCommercial bool             `json:"non_commercial,omitempty"`
+	License       string           `json:"license,omitempty"`
+	Annotations   []annotationInfo `json:"annotations"`
 }
 
 type annotationsResponse struct {
@@ -46,6 +48,8 @@ func sourceKind(s config.Source) string {
 		return "builtin"
 	case s.IsTool():
 		return "tool"
+	case s.IsGeneList():
+		return "genelist"
 	default:
 		return "data"
 	}
@@ -57,7 +61,11 @@ func (s *Server) describeAnnotations() annotationsResponse {
 	resp := annotationsResponse{Snapshot: s.snap.Name, Assembly: s.snap.Assembly}
 	// Index the flat, derived annotation list (carries Source + Default) by source.
 	for _, src := range s.snap.Sources {
-		info := sourceInfo{Name: src.Name, Version: src.Version, Type: sourceKind(src), Annotations: []annotationInfo{}}
+		info := sourceInfo{
+			Name: src.Name, Version: src.Version, Type: sourceKind(src),
+			NonCommercial: src.NonCommercial, License: src.License,
+			Annotations: []annotationInfo{},
+		}
 		for _, a := range s.snap.Annotations {
 			if !annotationBelongs(a, src) {
 				continue

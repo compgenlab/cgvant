@@ -264,6 +264,15 @@ type Source struct {
 	Assembly string `toml:"assembly,omitempty"` // genome assembly (e.g. GRCh38); verified against config
 	Format   string `toml:"format,omitempty"`   // vcf | bed | tab
 
+	// Licensing metadata (informational — nothing is blocked). NonCommercial marks
+	// that this source's data/annotations are restricted to non-commercial use (e.g.
+	// CADD), surfaced in `registry list`, at download, and in the server's annotation
+	// discovery so users are aware. License/LicenseURL carry the specifics (e.g.
+	// COSMIC requires a registered account to obtain the data).
+	NonCommercial bool   `toml:"non_commercial,omitempty"`
+	License       string `toml:"license,omitempty"`
+	LicenseURL    string `toml:"license_url,omitempty"`
+
 	// URL / URLIndex are the canonical reference locations (kept for provenance and
 	// the registry). LocalPath / LocalPathIndex are this machine's actual files: if
 	// LocalPath is set the file is used exactly and never downloaded.

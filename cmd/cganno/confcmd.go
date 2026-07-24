@@ -473,6 +473,22 @@ func cmdDownload(ctx context.Context, cfgPath, snapshot string, args []string) e
 		return err
 	}
 
+	// Non-commercial sources: inform the user (nothing is blocked) so they don't
+	// unknowingly obtain data whose terms restrict commercial use.
+	for _, s := range snap.Sources {
+		if !s.NonCommercial {
+			continue
+		}
+		msg := fmt.Sprintf("note: %s is restricted to NON-COMMERCIAL use", s.ID())
+		if s.License != "" {
+			msg += " (" + s.License + ")"
+		}
+		if s.LicenseURL != "" {
+			msg += " — " + s.LicenseURL
+		}
+		fmt.Fprintln(os.Stderr, msg)
+	}
+
 	// fetch.Snapshot handles data sources (download/build) + tool sources (image
 	// acquire + one-time setup) in one pass.
 	results, err := fetch.Snapshot(ctx, cfg, snap, *source, *force, *jobs)
