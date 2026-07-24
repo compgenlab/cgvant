@@ -77,7 +77,9 @@ func cmdInit(cfgPath string, args []string) error {
 	builtins := &config.Snapshot{Sources: []config.Source{{
 		Name: "builtins", Version: "1", Type: "builtin",
 		Annotations: []config.Annotation{
-			{Builtin: "auto_id"}, {Builtin: "indel"}, {Builtin: "tstv"},
+			{Builtin: "auto_id", Name: "auto_id"},
+			{Builtin: "indel", Name: "indel"},
+			{Builtin: "tstv", Name: "tstv"},
 		},
 	}}}
 	if err := config.WriteFragment(loaded.SourceFile("builtins", "1"), builtins); err != nil {
@@ -469,6 +471,22 @@ func cmdDownload(ctx context.Context, cfgPath, snapshot string, args []string) e
 	snap, err := cfg.LoadSnapshot(snapshot)
 	if err != nil {
 		return err
+	}
+
+	// Non-commercial sources: inform the user (nothing is blocked) so they don't
+	// unknowingly obtain data whose terms restrict commercial use.
+	for _, s := range snap.Sources {
+		if !s.NonCommercial {
+			continue
+		}
+		msg := fmt.Sprintf("note: %s is restricted to NON-COMMERCIAL use", s.ID())
+		if s.License != "" {
+			msg += " (" + s.License + ")"
+		}
+		if s.LicenseURL != "" {
+			msg += " — " + s.LicenseURL
+		}
+		fmt.Fprintln(os.Stderr, msg)
 	}
 
 	// fetch.Snapshot handles data sources (download/build) + tool sources (image
