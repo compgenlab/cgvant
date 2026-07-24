@@ -715,11 +715,19 @@ func (snap *Snapshot) normalize() {
 	}
 	for si := range snap.Sources {
 		s := &snap.Sources[si]
-		for _, a := range s.Annotations {
+		for ai := range s.Annotations {
+			a := &s.Annotations[ai]
 			if s.IsBuiltinSource() {
-				add(a, a.Builtin)
+				// A builtin's output name defaults to the builtin name when omitted
+				// (a blank key is never useful). Done in place so the overlay
+				// BuiltinSource — which reads the source's own annotations — and the
+				// flat list below both see the resolved name.
+				if a.Name == "" {
+					a.Name = a.Builtin
+				}
+				add(*a, a.Builtin)
 			} else {
-				add(a, s.Name) // data and tool sources alike
+				add(*a, s.Name) // data and tool sources alike
 			}
 		}
 	}

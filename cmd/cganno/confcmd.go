@@ -77,7 +77,9 @@ func cmdInit(cfgPath string, args []string) error {
 	builtins := &config.Snapshot{Sources: []config.Source{{
 		Name: "builtins", Version: "1", Type: "builtin",
 		Annotations: []config.Annotation{
-			{Builtin: "auto_id"}, {Builtin: "indel"}, {Builtin: "tstv"},
+			{Builtin: "auto_id", Name: "auto_id"},
+			{Builtin: "indel", Name: "indel"},
+			{Builtin: "tstv", Name: "tstv"},
 		},
 	}}}
 	if err := config.WriteFragment(loaded.SourceFile("builtins", "1"), builtins); err != nil {

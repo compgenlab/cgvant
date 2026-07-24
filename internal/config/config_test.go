@@ -166,6 +166,35 @@ func TestNormalizeSetsSource(t *testing.T) {
 	}
 }
 
+func TestNormalizeDefaultsBuiltinName(t *testing.T) {
+	snap := &Snapshot{
+		Sources: []Source{
+			{Type: "builtin", Annotations: []Annotation{
+				{Builtin: "auto_id"},             // no name → defaults to the builtin name
+				{Builtin: "tstv", Name: "ts_tv"}, // explicit name preserved
+			}},
+		},
+	}
+	snap.Normalize()
+
+	// The source's own annotations are defaulted in place (the overlay BuiltinSource
+	// reads these and keys output rows on Name).
+	if got := snap.Sources[0].Annotations[0].Name; got != "auto_id" {
+		t.Errorf("builtin without name: Name = %q, want auto_id", got)
+	}
+	if got := snap.Sources[0].Annotations[1].Name; got != "ts_tv" {
+		t.Errorf("builtin with explicit name overwritten: Name = %q, want ts_tv", got)
+	}
+	// The flat list carries the resolved names too.
+	names := map[string]bool{}
+	for _, a := range snap.Annotations {
+		names[a.Name] = true
+	}
+	if !names["auto_id"] || !names["ts_tv"] {
+		t.Errorf("flat annotations missing resolved names: %+v", snap.Annotations)
+	}
+}
+
 func TestResolveSourceFiles(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CGANNO_HOME", "")
